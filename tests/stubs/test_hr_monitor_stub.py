@@ -22,4 +22,6 @@ async def test_stream_hr_fills_queue_with_ramp():
 async def test_all_readings_are_ints():
     queue: asyncio.Queue = asyncio.Queue()
     await StubHRMonitor().stream_hr(queue, interval=0)
-    assert all(isinstance(r, int) for r in list(queue._queue))
+    readings = [queue.get_nowait() for _ in range(queue.qsize())]
+    assert readings
+    assert all(isinstance(r, int) for r in readings)
