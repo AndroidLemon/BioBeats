@@ -7,12 +7,15 @@
 
 import asyncio
 import enum
+import logging
 from dataclasses import dataclass
 
 from src.ble.hr_monitor import HRMonitorProtocol
 from src.engine.mrt2_client import MRT2ClientProtocol
 from src.mapping.hr_to_prompt import hr_to_conditioning
 from src.output.audio_sink import AudioSinkProtocol
+
+logger = logging.getLogger(__name__)
 
 
 class State(enum.Enum):
@@ -108,17 +111,15 @@ async def _next_latest_hr(queue: asyncio.Queue, producer: asyncio.Task):
     return latest
 
 
-async def run_pipeline(ctx: PipelineContext) -> State:
-    """Drive the pipeline: HR -> mapping -> conditioning -> audio chunk -> sink.
+async def _run_session(ctx: PipelineContext) -> State:
+    """Run one connect -> stream -> generate cycle. Returns the final state.
 
-    Imperative shell. Spawns the HR producer, then loops: take the latest HR,
-    update conditioning, generate one chunk off-thread (the model call is
-    blocking), and write it to the sink. Terminates when the HR source ends and
-    the queue is drained. Returns the final FSM state.
+    Spawns the HR producer, then loops: take the latest HR, update
+    conditioning, generate one chunk off-thread (the model call is blocking),
+    and write it to the sink. Terminates when the HR source ends and the queue
+    is drained. Raises if any collaborator (producer included) fails.
     """
-    state = State.IDLE
-    ctx.sink.start()
-    state = next_state(state, Event.CONNECT)  # -> CONNECTING
+    state = next_state(State.IDLE, Event.CONNECT)  # -> CONNECTING
     hr_task = asyncio.create_task(ctx.hr_monitor.stream_hr(ctx.hr_queue, ctx.interval))
     ready = False
     try:
@@ -135,8 +136,38 @@ async def run_pipeline(ctx: PipelineContext) -> State:
             chunk = await asyncio.to_thread(ctx.mrt.generate_chunk)
             ctx.sink.write(chunk)
             state = next_state(state, Event.CHUNK)  # -> STREAMING
+        # Surface a producer failure that ended the stream.
+        if hr_task.done() and not hr_task.cancelled() and hr_task.exception():
+            raise hr_task.exception()
+        return state
     finally:
         if not hr_task.done():
             hr_task.cancel()
+
+
+async def run_pipeline(ctx: PipelineContext, max_retries: int = 3) -> State:
+    """Drive the pipeline with bounded error recovery. Returns the final state.
+
+    On a collaborator failure the FSM enters ERROR and recovers (-> IDLE) for
+    another attempt, up to `max_retries` times. After that it surfaces the
+    error and settles in IDLE rather than looping forever (AGENTS.md rule).
+    """
+    ctx.sink.start()
+    state = State.IDLE
+    attempt = 0
+    try:
+        while True:
+            try:
+                state = await _run_session(ctx)
+                return state
+            except Exception as exc:  # noqa: BLE001 - boundary: any failure -> ERROR
+                state = next_state(state, Event.ERROR)  # -> ERROR
+                if attempt >= max_retries:
+                    logger.error(
+                        "pipeline failed after %d retries: %r", max_retries, exc
+                    )
+                    return next_state(state, Event.RECOVER)  # -> IDLE
+                attempt += 1
+                state = next_state(state, Event.RECOVER)  # -> IDLE, retry
+    finally:
         ctx.sink.stop()
-    return state

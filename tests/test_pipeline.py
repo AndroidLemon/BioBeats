@@ -60,6 +60,40 @@ async def test_pipeline_end_to_end_with_stubs():
     assert final == State.STREAMING
 
 
+class _FailingMRT2Client:
+    """MRT2 stub whose generate_chunk always raises; counts attempts."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def update_conditioning(self, conditioning: dict) -> None:
+        pass
+
+    def generate_chunk(self):
+        self.calls += 1
+        raise RuntimeError("model exploded")
+
+
+async def test_error_path_retries_then_settles_idle(caplog):
+    mrt = _FailingMRT2Client()
+    sink = NullAudioSink()
+    ctx = PipelineContext(
+        hr_monitor=StubHRMonitor(),
+        mrt=mrt,
+        sink=sink,
+        hr_queue=asyncio.Queue(),
+        interval=0,
+    )
+    final = await run_pipeline(ctx, max_retries=3)
+    # Settles in IDLE after exhausting retries.
+    assert final == State.IDLE
+    # 1 initial attempt + 3 retries = 4 generate_chunk calls.
+    assert mrt.calls == 4
+    # Sink released, error surfaced (not silently swallowed).
+    assert sink.stopped is True
+    assert "pipeline failed after 3 retries" in caplog.text
+
+
 async def test_latest_hr_wins_on_drain():
     queue: asyncio.Queue = asyncio.Queue()
     for value in [100, 120, 150, 175]:
