@@ -23,6 +23,7 @@ src/
   output/audio_sink.py     # sounddevice playback; AudioSinkProtocol
   integrations/osc_bridge.py  # OSC → RT2 control surface; OSCServerProtocol + OSCBridge
   integrations/osc_client.py  # loopback OSC sender; OSCSenderProtocol + OSCClient
+  integrations/fanout_osc_sender.py # mirrors one OSC stream to several senders
   integrations/midi_bridge.py # MIDI → OSC adapter; MIDIBridge
   midi/midi_source.py      # mido/rtmidi MIDI input; MIDISourceProtocol
   mapping/midi_to_conditioning.py  # pure fn: MIDI message → OSC (address, value) pairs
@@ -111,3 +112,24 @@ control_change (any CC)    ->  /rt2/intensity  (from CC value, continuous 0..1)
 Unlike the OSC bridge's chunk-paced latest-wins loop, every MIDI message is
 translated and forwarded immediately — discrete gestures (note hits, CC
 sweeps) shouldn't be collapsed the way a continuously-sampled signal can be.
+
+### Driving visuals too (e.g. Hydra)
+
+`--visuals-host`/`--visuals-port` mirror every forwarded message to a second
+OSC destination via `FanoutOSCSender` (`src/integrations/fanout_osc_sender.py`)
+— a thin `OSCSenderProtocol` that fans one send out to several. The same
+control stream that's steering RT2 can drive a visuals relay in lockstep, with
+no changes to `MIDIBridge`, `OSCBridge`, or anything downstream:
+
+```bash
+python run_midi.py --visuals-host 127.0.0.1 --visuals-port 9000
+```
+
+Browsers can't open raw UDP sockets, so [Hydra](https://hydra.ojack.xyz/) (a
+live-coding WebGL visual synth) can't receive OSC directly — the standard
+bridge is [hydra-osc](https://github.com/ojack/hydra-osc), a small relay that
+listens for OSC over UDP and rebroadcasts over WebSocket to the browser, where
+a loaded `OSC` instance maps incoming `/rt2/intensity`/`/rt2/prompt` values
+onto visual parameters. Point `--visuals-host`/`--visuals-port` at wherever
+that relay listens and Hydra renders in sync with the same signal driving the
+music — fanout is itself "just another OSC client."

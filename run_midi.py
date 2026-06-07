@@ -11,6 +11,11 @@
 # (notes, velocity, CC), so any device or tool — Dubler 2, a keyboard, a
 # controller, a DAW's virtual port — drives RT2 the same way. Point --port-name
 # at whichever one you want to play through.
+#
+# --visuals-host/--visuals-port mirror every forwarded message to a second OSC
+# destination via FanoutOSCSender — e.g. a hydra-osc relay so Hydra renders
+# visuals in lockstep with the same control stream driving RT2. Optional and
+# additive: omit them and nothing changes.
 
 import argparse
 import asyncio
@@ -39,7 +44,25 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser.add_argument(
         "--osc-port", type=int, default=DEFAULT_PORT, help="OSC bridge port to forward to."
     )
-    return parser.parse_args(argv)
+    parser.add_argument(
+        "--visuals-host",
+        default=None,
+        help=(
+            "Optional second OSC destination host to mirror every forwarded "
+            "message to — e.g. a hydra-osc relay driving Hydra visuals in "
+            "lockstep with RT2. Requires --visuals-port."
+        ),
+    )
+    parser.add_argument(
+        "--visuals-port",
+        type=int,
+        default=None,
+        help="Optional second OSC destination port. Requires --visuals-host.",
+    )
+    args = parser.parse_args(argv)
+    if (args.visuals_host is None) != (args.visuals_port is None):
+        parser.error("--visuals-host and --visuals-port must be given together")
+    return args
 
 
 def build_bridge(args: argparse.Namespace) -> MIDIBridge:
@@ -53,10 +76,15 @@ def build_bridge(args: argparse.Namespace) -> MIDIBridge:
     from src.integrations.osc_client import OSCClient
     from src.midi.midi_source import MIDISource
 
-    return MIDIBridge(
-        MIDISource(port_name=args.port_name),
-        OSCClient(host=args.osc_host, port=args.osc_port),
-    )
+    sender = OSCClient(host=args.osc_host, port=args.osc_port)
+    if args.visuals_host is not None:
+        from src.integrations.fanout_osc_sender import FanoutOSCSender
+
+        sender = FanoutOSCSender(
+            [sender, OSCClient(host=args.visuals_host, port=args.visuals_port)]
+        )
+
+    return MIDIBridge(MIDISource(port_name=args.port_name), sender)
 
 
 async def main_async(argv=None) -> int:
