@@ -23,26 +23,31 @@ from src.midi.midi_source import MIDISourceProtocol
 logger = logging.getLogger(__name__)
 
 
-async def _next_message(queue: asyncio.Queue, producer: asyncio.Task):
-    """Return the next queued MIDI message, or None once the producer is done
-    and the queue is drained.
+async def _next_message(queue: asyncio.Queue, producer: asyncio.Task, stop_event: asyncio.Event):
+    """Return the next queued MIDI message, or None once the producer is done,
+    stop_event is set, and the queue is drained.
 
     Every message matters here — note_on/CC events are discrete gestures, not
     a continuously-resampled signal — so messages come back one at a time, in
     order (no latest-wins collapsing, unlike _next_latest_hr in src/pipeline.py).
-    Blocks until a message is available or the producer completes.
+    Blocks until a message is available, the producer completes, or stop_event
+    is set — racing on stop_event is what lets stop() interrupt a bridge that's
+    idling on an empty queue (e.g. a MIDI controller with no current activity).
     """
     if not queue.empty():
         return queue.get_nowait()
-    if producer.done():
+    if producer.done() or stop_event.is_set():
         return None
     get_task = asyncio.ensure_future(queue.get())
+    stop_task = asyncio.ensure_future(stop_event.wait())
     done, _ = await asyncio.wait(
-        {get_task, producer}, return_when=asyncio.FIRST_COMPLETED
+        {get_task, producer, stop_task}, return_when=asyncio.FIRST_COMPLETED
     )
     if get_task in done:
+        stop_task.cancel()
         return get_task.result()
     get_task.cancel()
+    stop_task.cancel()
     if queue.empty():
         return None
     return queue.get_nowait()
@@ -61,21 +66,21 @@ class MIDIBridge:
     def __init__(self, source: MIDISourceProtocol, sender: OSCSenderProtocol) -> None:
         self._source = source
         self._sender = sender
-        self._running = False
+        self._stop_event: asyncio.Event = asyncio.Event()
 
     def stop(self) -> None:
-        """Request the forward loop to stop after the current message."""
-        self._running = False
+        """Request the forward loop to stop, including one blocked on the next message."""
+        self._stop_event.set()
 
     async def run(self, max_messages: int | None = None) -> int:
         """Stream and forward MIDI-translated OSC messages. Returns the count sent."""
         queue: asyncio.Queue = asyncio.Queue()
-        self._running = True
+        self._stop_event = asyncio.Event()
         source_task = asyncio.create_task(self._source.stream_messages(queue))
         forwarded = 0
         try:
-            while self._running:
-                message = await _next_message(queue, source_task)
+            while not self._stop_event.is_set():
+                message = await _next_message(queue, source_task, self._stop_event)
                 if message is None:
                     break
                 for address, value in midi_message_to_osc(message):
@@ -85,7 +90,7 @@ class MIDIBridge:
                         return forwarded
             return forwarded
         finally:
-            self._running = False
+            self._stop_event.set()
             source_task.cancel()
             try:
                 await source_task
