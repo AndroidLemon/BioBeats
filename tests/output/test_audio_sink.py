@@ -89,3 +89,30 @@ def test_partial_buffer_pads_remainder(monkeypatch):
     captured["callback"](out, 4, None, None)
     assert np.allclose(out[:2], 1.0)
     assert np.allclose(out[2:], 0.0)
+
+
+def test_callback_spans_multiple_chunks(monkeypatch):
+    captured = _install_fake_sounddevice(monkeypatch)
+    sink = AudioSink(blocksize=4)
+    sink.start()
+    # Two chunks of distinct values; one callback should span both.
+    sink.write(np.full((2, 2), 1.0, dtype=np.float32))
+    sink.write(np.full((2, 2), 2.0, dtype=np.float32))
+    out = np.zeros((4, 2), dtype=np.float32)
+    captured["callback"](out, 4, None, None)
+    assert np.allclose(out[:2], 1.0)
+    assert np.allclose(out[2:], 2.0)
+
+
+def test_partial_chunk_consumed_across_callbacks(monkeypatch):
+    captured = _install_fake_sounddevice(monkeypatch)
+    sink = AudioSink(blocksize=2)
+    sink.start()
+    # One 4-frame chunk consumed by two 2-frame callbacks (exercises head offset).
+    sink.write(np.array([[1, 1], [2, 2], [3, 3], [4, 4]], dtype=np.float32))
+    out1 = np.zeros((2, 2), dtype=np.float32)
+    captured["callback"](out1, 2, None, None)
+    assert np.allclose(out1, [[1, 1], [2, 2]])
+    out2 = np.zeros((2, 2), dtype=np.float32)
+    captured["callback"](out2, 2, None, None)
+    assert np.allclose(out2, [[3, 3], [4, 4]])
