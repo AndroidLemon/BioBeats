@@ -2,10 +2,10 @@
 name = "biometric-music-pipeline"
 version = "0.1.0"
 requires-python = ">=3.12"
-dependencies = ["bleak", "magenta-rt"]
+dependencies = ["bleak", "magenta-rt", "numpy", "sounddevice"]
 
 [dependency-groups]
-dev = ["pytest", "pytest-asyncio", "ruff"]
+dev = ["pytest", "pytest-asyncio", "pytest-cov", "ruff"]
 
 [tool.ruff]
 line-length = 88

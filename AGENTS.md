@@ -35,3 +35,25 @@ Agents operate within one state at a time. No cross-state side effects.
 - dev: integration branch
 - Feature branches: feat/<module>-<task>
 - Subagents work on feature branches; merge to dev when tests pass; merge to main via PR with CI green
+
+## Multi-Agent Coordination
+This repo is jointly maintained by Claude Code (local, feature branches) and the
+GitHub Copilot cloud agent (remote, issue-assigned tasks). Both agents read the
+same sources of truth: this file and `.github/copilot-instructions.md`.
+CI is the arbiter — green tests on a feature branch is the only merge gate,
+regardless of which agent wrote the code.
+
+- Claude Code's lane: local development on `feat/*` branches. Merge to `dev`
+  only when `uv run pytest` and `uv run ruff check .` both pass. Never push
+  directly to `main` or `dev`.
+- Copilot's lane: issue-assigned tasks, PR scaffolding, code review comments.
+- Before starting any task, run `git fetch && git status`. If a `feat/*` branch
+  already exists for the target module, inspect it before creating a new one.
+- If you open a branch and Copilot has also touched the same module, check for an
+  open PR before starting work — resolve at the branch level, not mid-implementation.
+
+Shared rules (enforced by CI, not trust):
+- One concern per commit, one module per commit
+- No hardcoded secrets
+- Stubs before real implementations
+- Max 3 retries on a failing task, then stop and surface the error
