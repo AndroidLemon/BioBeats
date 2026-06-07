@@ -1,5 +1,8 @@
-# Tests for the OSC bridge: handler dispatch, latest-wins conditioning, and a
-# full stub run (CI-safe — no network, no python-osc, no model, no audio device).
+# Tests for the OSC bridge: handler dispatch, latest-wins conditioning, malformed
+# message handling, server-death termination, and a full stub run (CI-safe — no
+# network, no python-osc, no model, no audio device).
+
+import asyncio
 
 from src.integrations.osc_bridge import OSCBridge, OSCServerProtocol
 from stubs.audio_sink_stub import NullAudioSink
@@ -64,3 +67,39 @@ async def test_run_pushes_default_conditioning_without_osc():
     bridge, mrt, sink, _ = _make_bridge(default_prompt="seed pad")
     await bridge.run(max_chunks=1)
     assert mrt.conditioning["prompt"] == "seed pad"
+
+
+def test_malformed_messages_do_not_raise():
+    # Empty/bad OSC args must not crash the server thread; they are ignored,
+    # leaving conditioning unchanged (only the initial default stays dirty).
+    bridge, _, _, server = _make_bridge()
+    bridge._take_conditioning()  # clear the initial default
+    server.dispatch("/rt2/prompt")  # no argument
+    server.dispatch("/rt2/intensity")  # no argument
+    server.dispatch("/rt2/intensity", "loud")  # non-numeric
+    assert bridge._take_conditioning() is None
+
+
+def test_intensity_is_clamped_to_unit_range():
+    bridge, _, _, server = _make_bridge()
+    server.dispatch("/rt2/intensity", 2.5)
+    assert bridge._take_conditioning()["intensity"] == 1.0
+    server.dispatch("/rt2/intensity", -0.5)
+    assert bridge._take_conditioning()["intensity"] == 0.0
+
+
+class _DyingOSCServer(StubOSCServer):
+    """OSC server whose serve() fails immediately, as a bind/receive error would."""
+
+    def serve(self) -> None:
+        raise RuntimeError("bind failed")
+
+
+async def test_run_stops_and_surfaces_server_thread_failure(caplog):
+    mrt = StubMRT2Client()
+    sink = NullAudioSink()
+    bridge = OSCBridge(mrt, sink, _DyingOSCServer())
+    # No max_chunks: the loop must terminate on its own when the server dies.
+    await asyncio.wait_for(bridge.run(), timeout=5)
+    assert sink.stopped is True
+    assert "OSC server thread failed" in caplog.text

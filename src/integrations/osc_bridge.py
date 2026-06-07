@@ -21,7 +21,6 @@
 # slot in here once MRT2Client consumes those conditioning keys.
 
 import asyncio
-import contextlib
 import logging
 import threading
 from typing import Callable, Protocol, runtime_checkable
@@ -123,7 +122,15 @@ class OSCBridge:
         self._server.map("/rt2/intensity", self._on_intensity)
 
     def _on_prompt(self, address: str, *args) -> None:
-        """/rt2/prompt <string> — set the style prompt for the next chunk."""
+        """/rt2/prompt <string> — set the style prompt for the next chunk.
+
+        Malformed messages (no argument) are ignored, not fatal: the handler
+        runs on the OSC server thread, so raising here would kill that thread
+        and silently stop all further control updates.
+        """
+        if not args:
+            logger.warning("ignoring %s: no argument", address)
+            return
         prompt = str(args[0])
         with self._lock:
             self._conditioning["prompt"] = prompt
@@ -131,8 +138,22 @@ class OSCBridge:
         logger.info("OSC prompt -> %r", prompt)
 
     def _on_intensity(self, address: str, *args) -> None:
-        """/rt2/intensity <float> — set the advisory intensity (0..1)."""
-        intensity = float(args[0])
+        """/rt2/intensity <float> — set the advisory intensity, clamped to 0..1.
+
+        Like _on_prompt, malformed messages (missing or non-numeric argument)
+        are ignored rather than crashing the OSC server thread. The value is
+        clamped to 0..1 so conditioning stays consistent with the HR mapping,
+        which always emits intensities in that range.
+        """
+        if not args:
+            logger.warning("ignoring %s: no argument", address)
+            return
+        try:
+            intensity = float(args[0])
+        except (TypeError, ValueError):
+            logger.warning("ignoring %s: non-numeric argument %r", address, args[0])
+            return
+        intensity = max(0.0, min(1.0, intensity))
         with self._lock:
             self._conditioning["intensity"] = intensity
             self._dirty = True
@@ -154,16 +175,19 @@ class OSCBridge:
 
         Starts the sink, runs the blocking OSC server off-thread, then loops:
         apply the latest conditioning (if any), generate one chunk off-thread
-        (the model call blocks), and write it to the sink. Runs until stop() /
-        the OSC server is shut down, or `max_chunks` chunks have been produced
-        (bounding the loop for tests). Always releases the sink and OSC server.
+        (the model call blocks), and write it to the sink. Runs until stop(),
+        the OSC server thread exits (clean shutdown or failure), or `max_chunks`
+        chunks have been produced (bounding the loop for tests). Always releases
+        the sink and OSC server.
         """
         self._sink.start()
         self._running = True
         serve_task = asyncio.create_task(asyncio.to_thread(self._server.serve))
         produced = 0
         try:
-            while self._running:
+            # Stop once the server thread is gone: generating against a dead
+            # control surface (e.g. a bind/receive failure) is pointless.
+            while self._running and not serve_task.done():
                 conditioning = self._take_conditioning()
                 if conditioning is not None:
                     self._mrt.update_conditioning(conditioning)
@@ -178,6 +202,10 @@ class OSCBridge:
             self._running = False
             self._server.shutdown()
             self._sink.stop()
-            # serve() returns once shutdown() lands; drain the task either way.
-            with contextlib.suppress(Exception):
+            # serve() returns once shutdown() lands. Surface (don't swallow) a
+            # server-thread error, but log rather than re-raise so it can't
+            # clobber a primary exception propagating out of the loop body.
+            try:
                 await serve_task
+            except Exception:
+                logger.exception("OSC server thread failed")
