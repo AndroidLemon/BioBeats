@@ -24,7 +24,7 @@ class _FakeWaveform:
 
 
 class _FakeRT2System:
-    """Stand-in for magenta_rt.mlx.system.MagentaRT2System."""
+    """Stand-in for magenta_rt.mlx.system.MagentaRT2SystemMlxfn."""
 
     def __init__(self, size="mrt2_base", **kwargs):
         self.size = size
@@ -48,7 +48,7 @@ class _FakeRT2System:
 def _inject_fake_backend(monkeypatch):
     fake_mlx = types.ModuleType("magenta_rt.mlx")
     fake_system = types.ModuleType("magenta_rt.mlx.system")
-    fake_system.MagentaRT2System = _FakeRT2System
+    fake_system.MagentaRT2SystemMlxfn = _FakeRT2System
     monkeypatch.setitem(sys.modules, "magenta_rt.mlx", fake_mlx)
     monkeypatch.setitem(sys.modules, "magenta_rt.mlx.system", fake_system)
 

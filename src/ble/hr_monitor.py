@@ -35,7 +35,9 @@ def parse_hr_measurement(data: bytes | bytearray) -> int:
     """
     flags = data[0]
     if flags & 0x01:
+        # print(f"Parsed HR measurement with 16-bit value: {data[1:3].hex()} -> {int.from_bytes(bytes(data[1:3]), 'little')}")
         return int.from_bytes(bytes(data[1:3]), "little")
+    # print(f"Parsed HR measurement with 8-bit value: {data[1]:02x} -> {data[1]}")
     return data[1]
 
 
@@ -67,6 +69,7 @@ class HRMonitor:
         prefix = self._name_prefix.lower()
         for device in await scanner_cls.discover():
             if device.name and device.name.lower().startswith(prefix):
+                # print(f"Found BLE device {device.name!r} at {device.address}, matching prefix {prefix!r}")
                 return device.address
         raise RuntimeError(f"No BLE device found with name prefix {self._name_prefix!r}")
 

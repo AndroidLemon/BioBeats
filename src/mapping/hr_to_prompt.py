@@ -12,6 +12,7 @@
 HR_MAX_DEFAULT = 185
 
 ZONE_PROMPTS = {
+    #"base":    "Prog Metal from Japan",
     "base":    "slow ambient pads, soft texture, minimal percussion, breathing space",
     "push":    "driving rhythmic pulse, building energy, percussive momentum",
     "all_out": "intense percussive peak, dense rhythm, maximum energy",
@@ -43,6 +44,8 @@ def zone_to_conditioning(zone: str, hr: int, hr_max: int = HR_MAX_DEFAULT) -> di
             zone_progress = (pct - low) / (high - low) if high > low else 1.0
             zone_progress = max(0.0, min(1.0, zone_progress))
             intensity = low + zone_progress * (high - low)
+            # print(f"Zone {zone!r}: HR {hr} is {pct:.1%} of max, zone progress {zone_progress:.1%}, intensity {intensity:.3f}")
+            # print(f"Conditioning dict: prompt={ZONE_PROMPTS[zone]!r}, intensity={intensity:.3f}")
             return {"prompt": ZONE_PROMPTS[zone], "intensity": round(intensity, 3)}
     raise ValueError(f"Unknown zone: {zone}")
 

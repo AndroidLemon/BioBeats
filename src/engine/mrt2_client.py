@@ -5,6 +5,7 @@
 # concrete model version. The real MRT2Client (added later) lazy-imports the RT2
 # package so this module stays import-clean without the model installed.
 
+from concurrent.futures import ThreadPoolExecutor
 from typing import Protocol, runtime_checkable
 
 import numpy as np
@@ -31,9 +32,21 @@ class MRT2ClientProtocol(Protocol):
 
 # --- Resolved RT2 API (verified against installed magenta-rt 2.0.2) ----------
 # STRICTLY Magenta RT2. The package exposes per-backend systems; the Apple
-# Silicon backend is `magenta_rt.mlx.system.MagentaRT2System` (MLX). Findings:
-#   - Construct once (loads weights, quantizes, warms up):
-#       mrt = MagentaRT2System(size="mrt2_small")   # or "mrt2_base"
+# Silicon backend lives in `magenta_rt.mlx.system`, which offers two loaders:
+#   - `MagentaRT2System(size=...)`: builds the model in Python/MLX and loads
+#     weights from a raw Linen-format checkpoint under
+#     ~/Documents/Magenta/magenta-rt-v2/checkpoints/<size>.safetensors
+#     (fetched separately via `mrt checkpoints download`).
+#   - `MagentaRT2SystemMlxfn(size=...)`: loads a pre-exported `.mlxfn` graph
+#     plus its `_state.safetensors` from
+#     ~/Documents/Magenta/magenta-rt-v2/models/<size>/ (fetched via
+#     `mrt models download`, the package's own CLI default).
+# We use MagentaRT2SystemMlxfn: it matches the asset format `mrt models
+# download` actually produces (no separate multi-GB raw-checkpoint download),
+# starts up faster (no Python model construction / weight loading / runtime
+# quantization), and exposes the identical surface we depend on:
+#   - Construct once (loads exported graph + state, warms up):
+#       mrt = MagentaRT2SystemMlxfn(size="mrt2_small")   # or "mrt2_base"
 #   - Text conditioning is a style EMBEDDING, recomputed only when it changes:
 #       style = mrt.embed_style("ambient driving pulse")  # 768-dim ndarray
 #   - Generation is blocking and threads a streaming state across calls:
@@ -42,7 +55,8 @@ class MRT2ClientProtocol(Protocol):
 #     audio.Waveform with `.samples` (numpy, 48kHz stereo) and `.sample_rate`.
 #   - Sizes "mrt2_small" (dev) and "mrt2_base" (demo) are the valid keys.
 # The MLX backend imports only on Apple Silicon, so it is imported lazily inside
-# __init__ — this module stays importable on CI/Linux (tests inject a fake).
+# _load_backend (run on the dedicated MLX thread, see MRT2Client) — this module
+# stays importable on CI/Linux (tests inject a fake).
 
 SAMPLE_RATE = 48000
 CHANNELS = 2
@@ -58,27 +72,43 @@ class MRT2Client:
     streaming state. Conditioning updates re-embed only when the prompt changes;
     each generate_chunk threads the state forward and returns one 2s chunk as a
     (96000, 2) float32 array.
+
+    MLX binds its GPU command stream to the thread that builds the model graph;
+    calling into the model from a different thread raises "There is no
+    Stream(gpu, N) in current thread." The pipeline already runs generate_chunk
+    via asyncio.to_thread (to keep the event loop responsive), and that may pick
+    a different worker thread than __init__ ran on — and a different one between
+    calls. So every MLX touchpoint (construction, embedding, generation) is
+    funnelled through one dedicated single-worker executor to guarantee they all
+    run on the same thread.
     """
 
     def __init__(self, size: str = "mrt2_small", default_prompt: str = "ambient") -> None:
-        # Lazy import: MLX only exists on Apple Silicon.
-        from magenta_rt.mlx.system import MagentaRT2System
-
-        self._mrt = MagentaRT2System(size=size)
+        self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="mrt2-mlx")
         self._prompt = default_prompt
-        self._style = self._mrt.embed_style(default_prompt)
         self._state = None
+        self._mrt, self._style = self._executor.submit(
+            self._load_backend, size, default_prompt
+        ).result()
+
+    @staticmethod
+    def _load_backend(size: str, default_prompt: str):
+        # Lazy import: MLX only exists on Apple Silicon.
+        from magenta_rt.mlx.system import MagentaRT2SystemMlxfn
+
+        mrt = MagentaRT2SystemMlxfn(size=size)
+        return mrt, mrt.embed_style(default_prompt)
 
     def update_conditioning(self, conditioning: dict) -> None:
         """Re-embed the style only when the prompt actually changes."""
         prompt = conditioning["prompt"]
         if prompt != self._prompt:
             self._prompt = prompt
-            self._style = self._mrt.embed_style(prompt)
+            self._style = self._executor.submit(self._mrt.embed_style, prompt).result()
 
     def generate_chunk(self) -> np.ndarray:
         """Generate one 2s chunk, threading the streaming state forward."""
-        wav, self._state = self._mrt.generate(
-            style=self._style, frames=CHUNK_FRAMES, state=self._state
-        )
+        wav, self._state = self._executor.submit(
+            self._mrt.generate, style=self._style, frames=CHUNK_FRAMES, state=self._state
+        ).result()
         return np.asarray(wav.samples, dtype=np.float32)
