@@ -34,6 +34,8 @@ def note_to_zone(
     note: int, note_min: int = NOTE_MIN_DEFAULT, note_max: int = NOTE_MAX_DEFAULT
 ) -> str:
     """Return zone name from a MIDI note number. At a boundary, selects the higher zone."""
+    if note_max <= note_min:
+        raise ValueError(f"note_max ({note_max}) must be greater than note_min ({note_min})")
     pct = (note - note_min) / (note_max - note_min)
     zone = "low"
     for name, low, _ in ZONE_BOUNDARIES:

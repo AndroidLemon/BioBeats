@@ -26,6 +26,16 @@ def test_high_zone():
     assert note_to_zone(120) == "high"
 
 
+def test_note_to_zone_rejects_equal_min_and_max():
+    with pytest.raises(ValueError):
+        note_to_zone(50, note_min=60, note_max=60)
+
+
+def test_note_to_zone_rejects_inverted_range():
+    with pytest.raises(ValueError):
+        note_to_zone(50, note_min=80, note_max=20)
+
+
 def test_boundary_goes_up():
     # 40% of the 0-127 range is ~50.8; 51 should fall in "mid", not "low"
     assert note_to_zone(51) == "mid"
