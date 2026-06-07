@@ -2,7 +2,7 @@
 name = "biometric-music-pipeline"
 version = "0.1.0"
 requires-python = ">=3.12"
-dependencies = ["bleak", "magenta-rt", "numpy", "sounddevice"]
+dependencies = ["bleak", "magenta-rt", "numpy", "python-osc", "sounddevice"]
 
 [dependency-groups]
 dev = ["pytest", "pytest-asyncio", "pytest-cov", "ruff"]
