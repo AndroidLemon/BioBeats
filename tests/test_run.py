@@ -12,18 +12,18 @@ def test_parse_args_defaults():
     args = parse_args([])
     assert args.stub is False
     assert args.hr_max == 185
-    assert args.tag == "mrt2_small"
+    assert args.size == "mrt2_small"
 
 
 def test_parse_args_flags():
-    args = parse_args(["--stub", "--hr-max", "200", "--tag", "mrt2_base"])
+    args = parse_args(["--stub", "--hr-max", "200", "--size", "mrt2_base"])
     assert args.stub is True
     assert args.hr_max == 200
-    assert args.tag == "mrt2_base"
+    assert args.size == "mrt2_base"
 
 
 def test_build_context_stub_wires_stubs():
-    ctx = build_context(use_stub=True, hr_max=190, tag="mrt2_small")
+    ctx = build_context(use_stub=True, hr_max=190, size="mrt2_small")
     assert isinstance(ctx.hr_monitor, StubHRMonitor)
     assert isinstance(ctx.mrt, StubMRT2Client)
     assert isinstance(ctx.sink, NullAudioSink)

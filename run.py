@@ -27,14 +27,14 @@ def parse_args(argv=None) -> argparse.Namespace:
         help="Max heart rate used for zone mapping.",
     )
     parser.add_argument(
-        "--tag",
+        "--size",
         default="mrt2_small",
         help="Magenta RT2 model size: mrt2_small (dev) or mrt2_base (demo).",
     )
     return parser.parse_args(argv)
 
 
-def build_context(use_stub: bool, hr_max: int, tag: str) -> PipelineContext:
+def build_context(use_stub: bool, hr_max: int, size: str) -> PipelineContext:
     """Construct a PipelineContext with stub or real collaborators."""
     queue: asyncio.Queue = asyncio.Queue()
     if use_stub:
@@ -57,7 +57,7 @@ def build_context(use_stub: bool, hr_max: int, tag: str) -> PipelineContext:
 
     return PipelineContext(
         hr_monitor=HRMonitor(),
-        mrt=MRT2Client(size=tag),
+        mrt=MRT2Client(size=size),
         sink=AudioSink(),
         hr_queue=queue,
         hr_max=hr_max,
@@ -67,7 +67,7 @@ def build_context(use_stub: bool, hr_max: int, tag: str) -> PipelineContext:
 async def main_async(argv=None) -> State:
     """Build the context from args and run the pipeline."""
     args = parse_args(argv)
-    ctx = build_context(args.stub, args.hr_max, args.tag)
+    ctx = build_context(args.stub, args.hr_max, args.size)
     return await run_pipeline(ctx)
 
 

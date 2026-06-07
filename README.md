@@ -44,8 +44,8 @@ uv run ruff check .
 
 ```bash
 python run.py --stub                 # synthetic end-to-end smoke (no hardware/ML)
-python run.py --tag mrt2_small       # real run (dev model) on Apple Silicon
-python run.py --tag mrt2_base        # real run (demo model)
+python run.py --size mrt2_small      # real run (dev model) on Apple Silicon
+python run.py --size mrt2_base       # real run (demo model)
 ```
 
 Real runs require an Apple-Silicon Mac (RT2 uses MLX) and the OTBeat Burn
