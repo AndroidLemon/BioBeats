@@ -32,6 +32,7 @@ src/
     fsm.py               # pure State/Event/next_state lifecycle core
     rt2_engine.py        # RT2Engine: owns model+sink, FSM generate loop, OSC control surface
   output/audio_sink.py   # sounddevice playback; AudioSinkProtocol
+  output/recording_audio_sink.py  # AudioSinkProtocol decorator → WAV tee
   ble/hr_monitor.py      # bleak HR monitor; HRMonitorProtocol + StubHRMonitor twin
   midi/midi_source.py    # mido/rtmidi MIDI input; MIDISourceProtocol
   mapping/
@@ -43,11 +44,13 @@ src/
     fanout_osc_sender.py # mirrors one OSC stream to several senders (e.g. + visuals)
     biometric_bridge.py  # HR → OSC adapter; BiometricBridge
     midi_bridge.py       # MIDI → OSC adapter; MIDIBridge
+    control_log.py       # OSCSenderProtocol decorator → JSONL log; RecordingOSCSender
 stubs/                   # deterministic, hardware-free implementations of each Protocol
 tests/                   # mirrors src/
 run_engine.py            # the RT2 engine (real or --stub) — launch first
 run.py                   # biometric (HR) → OSC adapter (real or --stub)
 run_midi.py              # MIDI → OSC adapter (real or --stub)
+replay.py                # re-emit a recorded control log over OSC
 ```
 
 Each real module shares a `typing.Protocol` with its stub, so the engine and
@@ -118,6 +121,29 @@ control_change (any CC)    ->  /rt2/intensity  (from CC value, continuous 0..1)
 To add another (e.g. a gamepad, a sensor), write a `*_bridge.py` adapter + a
 pure mapping module and point it at the engine — nothing in `rt2_engine.py`
 changes. The mapping modules are the creative core; retune them to taste.
+
+## Recording & replay
+
+Keep a take, then reproduce it. Both recorders are decorators (like
+`FanoutOSCSender`) — pure composition, no engine/adapter changes.
+
+```bash
+# record the control stream a source emits (replayable JSONL), on any adapter
+python run.py --record take.jsonl
+python run_midi.py --record take.jsonl
+
+# record the engine's generated audio to a WAV (48kHz stereo, 16-bit)
+python run_engine.py --record-audio take.wav
+
+# replay a control take into a running engine, with its original timing
+python replay.py take.jsonl            # python replay.py take.jsonl --speed 2.0
+```
+
+The control log is timestamped JSONL — one `/rt2/*` message per line, relative to
+the first send — so it diffs cleanly and doubles as regression material. `--record`
+sits outermost, so it logs exactly what's sent (including to a visuals fanout). RT2
+generation isn't necessarily deterministic, but the control stream replays
+faithfully.
 
 ## Driving visuals too (e.g. Hydra)
 
