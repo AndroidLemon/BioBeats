@@ -23,65 +23,12 @@
 import asyncio
 import logging
 import threading
-from typing import Callable, Protocol, runtime_checkable
 
 from src.engine.mrt2_client import MRT2ClientProtocol
+from src.integrations.osc_server import OSCServerProtocol
 from src.output.audio_sink import AudioSinkProtocol
 
 logger = logging.getLogger(__name__)
-
-DEFAULT_HOST = "127.0.0.1"
-DEFAULT_PORT = 5005
-
-
-@runtime_checkable
-class OSCServerProtocol(Protocol):
-    """Interface shared by the real OSC server and StubOSCServer.
-
-    The bridge registers address handlers via map(), then serve() blocks
-    receiving messages until shutdown() is called from another thread. Handlers
-    are invoked as handler(address, *args), matching python-osc's dispatcher.
-    """
-
-    def map(self, address: str, handler: Callable[..., None]) -> None:
-        """Route messages sent to `address` to `handler(address, *args)`."""
-        ...
-
-    def serve(self) -> None:
-        """Block, dispatching incoming messages, until shutdown() is called."""
-        ...
-
-    def shutdown(self) -> None:
-        """Unblock serve() and stop receiving. Safe to call from any thread."""
-        ...
-
-
-class OSCServer:
-    """Real OSC server backed by python-osc (UDP).
-
-    Lazy-imports python-osc in __init__ so this module stays importable without
-    it (the stub path and CI never touch the network). Binds the socket on
-    construction; serve() runs the blocking receive loop and shutdown() stops it.
-    """
-
-    def __init__(self, host: str = DEFAULT_HOST, port: int = DEFAULT_PORT) -> None:
-        from pythonosc.dispatcher import Dispatcher
-        from pythonosc.osc_server import BlockingOSCUDPServer
-
-        self._dispatcher = Dispatcher()
-        self._server = BlockingOSCUDPServer((host, port), self._dispatcher)
-
-    def map(self, address: str, handler: Callable[..., None]) -> None:
-        """Register `handler` for `address`. python-osc calls it as (addr, *args)."""
-        self._dispatcher.map(address, handler)
-
-    def serve(self) -> None:
-        """Run python-osc's blocking serve loop until shutdown()."""
-        self._server.serve_forever()
-
-    def shutdown(self) -> None:
-        """Stop the serve loop and close the socket."""
-        self._server.shutdown()
 
 
 class OSCBridge:

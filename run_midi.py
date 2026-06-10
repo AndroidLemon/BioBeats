@@ -22,7 +22,7 @@ import asyncio
 import logging
 
 from src.integrations.midi_bridge import MIDIBridge
-from src.integrations.osc_bridge import DEFAULT_HOST, DEFAULT_PORT
+from src.integrations.osc_server import DEFAULT_HOST, DEFAULT_PORT
 
 
 def parse_args(argv=None) -> argparse.Namespace:

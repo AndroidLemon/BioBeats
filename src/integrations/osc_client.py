@@ -12,7 +12,7 @@
 
 from typing import Protocol, runtime_checkable
 
-from src.integrations.osc_bridge import DEFAULT_HOST, DEFAULT_PORT
+from src.integrations.osc_server import DEFAULT_HOST, DEFAULT_PORT
 
 
 @runtime_checkable

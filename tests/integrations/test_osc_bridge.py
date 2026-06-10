@@ -4,7 +4,8 @@
 
 import asyncio
 
-from src.integrations.osc_bridge import OSCBridge, OSCServerProtocol
+from src.integrations.osc_bridge import OSCBridge
+from src.integrations.osc_server import OSCServerProtocol
 from stubs.audio_sink_stub import NullAudioSink
 from stubs.mrt2_client_stub import StubMRT2Client
 from stubs.osc_server_stub import StubOSCServer
