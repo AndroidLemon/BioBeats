@@ -10,7 +10,8 @@ import argparse
 import asyncio
 import logging
 
-from src.integrations.osc_bridge import OSCBridge
+from src.engine.fsm import State
+from src.engine.rt2_engine import RT2Engine
 from src.integrations.osc_server import DEFAULT_HOST, DEFAULT_PORT
 
 
@@ -37,14 +38,14 @@ def parse_args(argv=None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def build_bridge(args: argparse.Namespace) -> OSCBridge:
-    """Construct an OSCBridge with stub or real collaborators."""
+def build_engine(args: argparse.Namespace) -> RT2Engine:
+    """Construct an RT2Engine with stub or real collaborators."""
     if args.stub:
         from stubs.audio_sink_stub import NullAudioSink
         from stubs.mrt2_client_stub import StubMRT2Client
         from stubs.osc_server_stub import StubOSCServer
 
-        return OSCBridge(
+        return RT2Engine(
             StubMRT2Client(),
             NullAudioSink(),
             StubOSCServer(),
@@ -55,7 +56,7 @@ def build_bridge(args: argparse.Namespace) -> OSCBridge:
     from src.integrations.osc_server import OSCServer
     from src.output.audio_sink import AudioSink
 
-    return OSCBridge(
+    return RT2Engine(
         MRT2Client(size=args.size, default_prompt=args.prompt),
         AudioSink(),
         OSCServer(host=args.host, port=args.port),
@@ -63,16 +64,16 @@ def build_bridge(args: argparse.Namespace) -> OSCBridge:
     )
 
 
-async def main_async(argv=None) -> int:
-    """Build the bridge from args and run it."""
+async def main_async(argv=None) -> State:
+    """Build the engine from args and run it."""
     args = parse_args(argv)
-    bridge = build_bridge(args)
+    engine = build_engine(args)
     # Stub run is unbounded by default; bound it so the CI smoke path terminates.
     max_chunks = 1 if args.stub else None
-    return await bridge.run(max_chunks=max_chunks)
+    return await engine.run(max_chunks=max_chunks)
 
 
-def main(argv=None) -> int:
+def main(argv=None) -> State:
     """CLI entrypoint."""
     logging.basicConfig(level=logging.INFO)
     return asyncio.run(main_async(argv))

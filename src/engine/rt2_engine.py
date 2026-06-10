@@ -1,17 +1,17 @@
-# OSC control surface for a Magenta RT2 client.
+# The RT2 engine — the one thing that owns the model and the generate loop.
 #
-# This generalizes the pipeline's "drive the model from a control source"
-# pattern: instead of heart-rate ticks (src/pipeline.py), conditioning arrives
-# as OSC messages, so ANY OSC-speaking environment can steer RT2 — SuperCollider,
-# Max/MSP, Pure Data, Sonic Pi, TouchOSC, or a MIDI source bridged to OSC. The
-# bridge owns one model + one sink and runs the generate loop; the network side
-# only feeds it conditioning.
+# Every control surface in the project (the biometric bridge, the MIDI bridge,
+# or any external OSC tool like SuperCollider / TouchOSC) feeds this engine the
+# same way: by sending /rt2/* messages to its OSC control surface. The engine
+# owns the single MRT2 client + audio sink, runs the FSM lifecycle
+# (src/engine/fsm.py) with bounded error recovery, and applies the latest
+# conditioning at each chunk boundary. Because all model calls funnel through
+# one MRT2Client (and its single MLX thread), generation must live in exactly
+# one place — here.
 #
-# Same modular contract as the rest of BioBeats: the bridge depends only on
-# MRT2ClientProtocol (src/engine), AudioSinkProtocol (src/output), and the
-# OSCServerProtocol below — never on a concrete model version or OSC library.
-# python-osc is lazy-imported in the real OSCServer, so this module imports
-# clean on CI (the stub path needs no network or python-osc).
+# It depends only on MRT2ClientProtocol, AudioSinkProtocol, and OSCServerProtocol
+# — never on a concrete model version or OSC library. python-osc is lazy-imported
+# in the real OSCServer, so this module imports clean on CI.
 #
 # OSC address space (control-rate; one model + one sink behind it):
 #   /rt2/prompt      s   set the style prompt (re-embeds only on change)
@@ -24,6 +24,7 @@ import asyncio
 import logging
 import threading
 
+from src.engine.fsm import Event, State, next_state
 from src.engine.mrt2_client import MRT2ClientProtocol
 from src.integrations.osc_server import OSCServerProtocol
 from src.output.audio_sink import AudioSinkProtocol
@@ -31,14 +32,15 @@ from src.output.audio_sink import AudioSinkProtocol
 logger = logging.getLogger(__name__)
 
 
-class OSCBridge:
-    """Drive an RT2 client from OSC control messages, streaming audio to a sink.
+class RT2Engine:
+    """Own the RT2 model + audio sink and stream generated chunks under the FSM.
 
     Conditioning handlers (running on the OSC server's thread) mutate a shared
     conditioning dict under a lock and mark it dirty. The async generate loop
-    applies the latest conditioning at each chunk boundary — the same
-    latest-wins discipline the HR pipeline uses, so a burst of OSC updates
-    between chunks collapses to one re-embed.
+    applies the latest conditioning at each chunk boundary — latest-wins, so a
+    burst of control updates between chunks collapses to one re-embed. On a
+    generation failure the FSM enters ERROR and recovers for another attempt,
+    up to max_retries times, then settles in IDLE rather than looping forever.
     """
 
     def __init__(
@@ -61,6 +63,8 @@ class OSCBridge:
         # Push the default conditioning before the first chunk.
         self._dirty = True
         self._running = False
+        self._max_chunks: int | None = None
+        self._produced = 0
         self._register()
 
     def _register(self) -> None:
@@ -117,34 +121,58 @@ class OSCBridge:
         """Request the generate loop to stop after the current chunk."""
         self._running = False
 
-    async def run(self, max_chunks: int | None = None) -> int:
-        """Serve OSC and stream generated chunks until stopped. Returns chunk count.
+    async def _stream_session(self, serve_task: asyncio.Task) -> State:
+        """Run one streaming session, returning its terminal state.
 
-        Starts the sink, runs the blocking OSC server off-thread, then loops:
-        apply the latest conditioning (if any), generate one chunk off-thread
-        (the model call blocks), and write it to the sink. Runs until stop(),
-        the OSC server thread exits (clean shutdown or failure), or `max_chunks`
-        chunks have been produced (bounding the loop for tests). Always releases
-        the sink and OSC server.
+        CONNECTING -> STREAMING, then a chunk per tick until stop(), the OSC
+        server thread exits, or max_chunks is reached. Raises if generation
+        fails — run() catches that to drive the ERROR/recovery cycle.
+        """
+        state = next_state(State.IDLE, Event.CONNECT)  # -> CONNECTING
+        state = next_state(state, Event.READY)  # -> STREAMING
+        while self._running and not serve_task.done():
+            if self._max_chunks is not None and self._produced >= self._max_chunks:
+                break
+            conditioning = self._take_conditioning()
+            if conditioning is not None:
+                self._mrt.update_conditioning(conditioning)
+            state = next_state(state, Event.TICK)  # -> GENERATING
+            # The model call blocks (MLX); keep the event loop responsive.
+            chunk = await asyncio.to_thread(self._mrt.generate_chunk)
+            self._sink.write(chunk)
+            self._produced += 1
+            state = next_state(state, Event.CHUNK)  # -> STREAMING
+        return state
+
+    async def run(self, max_chunks: int | None = None, max_retries: int = 3) -> State:
+        """Serve OSC and stream generated chunks under the FSM. Returns final state.
+
+        Starts the sink, runs the blocking OSC server off-thread, then streams
+        chunks (applying the latest conditioning each boundary). On a generation
+        failure the FSM enters ERROR and retries the session up to max_retries
+        times, then surfaces the error and settles in IDLE. `max_chunks` bounds
+        the loop for tests. Always releases the sink and OSC server.
         """
         self._sink.start()
         self._running = True
+        self._max_chunks = max_chunks
+        self._produced = 0
         serve_task = asyncio.create_task(asyncio.to_thread(self._server.serve))
-        produced = 0
+        state = State.IDLE
+        attempt = 0
         try:
-            # Stop once the server thread is gone: generating against a dead
-            # control surface (e.g. a bind/receive failure) is pointless.
-            while self._running and not serve_task.done():
-                conditioning = self._take_conditioning()
-                if conditioning is not None:
-                    self._mrt.update_conditioning(conditioning)
-                # The model call blocks (JAX/MLX); keep the event loop responsive.
-                chunk = await asyncio.to_thread(self._mrt.generate_chunk)
-                self._sink.write(chunk)
-                produced += 1
-                if max_chunks is not None and produced >= max_chunks:
-                    break
-            return produced
+            while True:
+                try:
+                    return await self._stream_session(serve_task)
+                except Exception as exc:  # noqa: BLE001 - boundary: any failure -> ERROR
+                    state = next_state(state, Event.ERROR)  # -> ERROR
+                    if attempt >= max_retries:
+                        logger.error(
+                            "engine failed after %d retries: %r", max_retries, exc
+                        )
+                        return next_state(state, Event.RECOVER)  # -> IDLE
+                    attempt += 1
+                    state = next_state(state, Event.RECOVER)  # -> IDLE, retry
         finally:
             self._running = False
             self._server.shutdown()

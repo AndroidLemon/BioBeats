@@ -1,5 +1,5 @@
 # Tests for the OSC sender: the loopback client the MIDI bridge uses to forward
-# translated control messages into the running OSCBridge (or any OSC listener).
+# translated control messages into the running RT2Engine (or any OSC listener).
 # The real OSCClient is exercised end-to-end over a real loopback UDP socket —
 # no mocking of python-osc — since UDP sends need no bound listener and stay
 # CI-safe on an ephemeral port.
