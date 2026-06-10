@@ -1,6 +1,10 @@
-# Entrypoint: run the OSC bridge so any OSC-speaking environment can steer RT2.
+# Entrypoint: run the RT2 engine — the one process that owns the model and the
+# generate loop. Every control surface (run.py for biometrics, run_midi.py for
+# MIDI, or any external OSC tool like SuperCollider) steers it by sending /rt2/*
+# messages to the OSC control surface this opens. Launch this first, then point
+# any number of sources at it.
 #
-# `--stub` runs the fully synthetic bridge (StubOSCServer + stub model + null
+# `--stub` runs the fully synthetic engine (StubOSCServer + stub model + null
 # sink, no network/model/audio) and is the CI smoke path. Without it, the real
 # python-osc UDP server, Magenta RT2 client, and sounddevice sink are wired in.
 # Real implementations are imported lazily inside the selected branch so the
@@ -17,7 +21,7 @@ from src.integrations.osc_server import DEFAULT_HOST, DEFAULT_PORT
 
 def parse_args(argv=None) -> argparse.Namespace:
     """Parse CLI arguments."""
-    parser = argparse.ArgumentParser(description="OSC -> Magenta RT2 bridge")
+    parser = argparse.ArgumentParser(description="Magenta RT2 engine (OSC-controlled)")
     parser.add_argument(
         "--stub",
         action="store_true",
