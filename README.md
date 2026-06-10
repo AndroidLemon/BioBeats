@@ -43,11 +43,13 @@ src/
     fanout_osc_sender.py # mirrors one OSC stream to several senders (e.g. + visuals)
     biometric_bridge.py  # HR → OSC adapter; BiometricBridge
     midi_bridge.py       # MIDI → OSC adapter; MIDIBridge
+  diagnostics/doctor.py  # per-layer preflight checks for the real rig
 stubs/                   # deterministic, hardware-free implementations of each Protocol
 tests/                   # mirrors src/
 run_engine.py            # the RT2 engine (real or --stub) — launch first
 run.py                   # biometric (HR) → OSC adapter (real or --stub)
 run_midi.py              # MIDI → OSC adapter (real or --stub)
+run_doctor.py            # preflight diagnostics for the real rig
 ```
 
 Each real module shares a `typing.Protocol` with its stub, so the engine and
@@ -80,6 +82,22 @@ python run_midi.py --port-name "Dubler"      # MIDI → /rt2/*
 Every entrypoint takes `--stub` for a synthetic, dependency-free smoke run (the
 CI path). Real biometric runs need the OTBeat Burn disconnected from the OTF app
 so it's free to pair; `--hr-max` tunes the zone mapping (default 185).
+
+### Preflight check
+
+Before fighting with a real run, `run_doctor.py` checks each layer of the rig
+independently (Python, Apple-Silicon/MLX, OSC port, audio device, BLE/OTBeat, RT2
+model) and tells you which one isn't ready:
+
+```bash
+python run_doctor.py                 # all checks, fast (no model load)
+python run_doctor.py --play-tone     # also play a test tone through the output
+python run_doctor.py --load-model    # also construct RT2 + time one chunk
+python run_doctor.py --only osc-port,audio   # or --skip ble
+```
+
+It exits non-zero only if a check **FAIL**s (WARN/SKIP don't), so it also works
+as a setup gate.
 
 ## The control contract: `/rt2/*`
 
