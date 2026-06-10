@@ -1,4 +1,4 @@
-# Stub for src/integrations/osc_bridge.py's OSCServerProtocol.
+# Stub for src/integrations/osc_server.py's OSCServerProtocol.
 # StubOSCServer needs no network and no python-osc: it records handler maps and
 # lets tests inject messages directly via dispatch(), so the OSC bridge can be
 # exercised end-to-end on CI. serve() blocks (like the real receive loop) until

@@ -1,9 +1,9 @@
-# Entrypoint: bridge a MIDI input into a running OSC bridge (run_osc.py).
+# Entrypoint: bridge a MIDI input into a running RT2 engine (run_engine.py).
 #
 # `--stub` runs the fully synthetic adapter (StubMIDISource + StubOSCClient, no
 # hardware/network) and is the CI smoke path. Without it, the real mido/rtmidi
 # input port and a loopback python-osc UDP client are wired in — point
-# --osc-host/--osc-port at wherever run_osc.py is listening (defaults match).
+# --osc-host/--osc-port at wherever run_engine.py is listening (defaults match).
 # Real implementations are imported lazily inside the selected branch so the
 # stub path never pulls mido / python-rtmidi / python-osc.
 #
@@ -22,7 +22,7 @@ import asyncio
 import logging
 
 from src.integrations.midi_bridge import MIDIBridge
-from src.integrations.osc_bridge import DEFAULT_HOST, DEFAULT_PORT
+from src.integrations.osc_server import DEFAULT_HOST, DEFAULT_PORT
 
 
 def parse_args(argv=None) -> argparse.Namespace:

@@ -1,4 +1,4 @@
-# Maps MIDI messages to OSC control messages for the RT2 OSC bridge.
+# Maps MIDI messages to OSC control messages for the RT2 engine.
 # This is the creative core of the MIDI adapter — tune zones and prompts to taste.
 # Deliberately source-agnostic: it only looks at standard MIDI message fields
 # (type, note, velocity, control, value), so any MIDI device or tool — Dubler 2,
@@ -12,7 +12,7 @@
 #   anything else (note_off, pitchwheel, ...) -> ignored
 #
 # OSC message shape: list of (address, value) pairs, matching the address space
-# OSCBridge already exposes (src/integrations/osc_bridge.py).
+# RT2Engine already exposes (src/engine/rt2_engine.py).
 
 NOTE_MIN_DEFAULT = 0
 NOTE_MAX_DEFAULT = 127

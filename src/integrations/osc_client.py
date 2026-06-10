@@ -1,18 +1,18 @@
 # OSC sender — the loopback control-message client used by adapters (e.g. the
-# MIDI bridge) to feed conditioning into a running OSCBridge.
+# MIDI and biometric bridges) to feed conditioning into a running RT2Engine.
 #
 # This keeps adapters "just another OSC client": they speak the same wire
-# protocol and address space (/rt2/prompt, /rt2/intensity — see osc_bridge.py)
+# protocol and address space (/rt2/prompt, /rt2/intensity — see rt2_engine.py)
 # as SuperCollider, Max/MSP, or TouchOSC would, over loopback UDP. No coupling
-# to OSCBridge internals; swapping in a different control source means nothing
-# in the bridge has to change.
+# to RT2Engine internals; swapping in a different control source means nothing
+# in the engine has to change.
 #
 # python-osc is lazy-imported in the real OSCClient so this module stays
 # importable on CI without it (the stub path needs no network).
 
 from typing import Protocol, runtime_checkable
 
-from src.integrations.osc_bridge import DEFAULT_HOST, DEFAULT_PORT
+from src.integrations.osc_server import DEFAULT_HOST, DEFAULT_PORT
 
 
 @runtime_checkable

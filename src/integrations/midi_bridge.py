@@ -1,14 +1,14 @@
 # MIDI -> OSC bridge: forwards MIDI input as RT2 control messages.
 #
-# Generalizes the same "drive RT2 from a control source" pattern as the OSC
-# bridge and HR pipeline, one layer further out: a MIDI device or tool (Dubler
+# Generalizes the same "drive RT2 from a control source" pattern as the engine
+# and biometric bridge, one layer further out: a MIDI device or tool (Dubler
 # 2, a keyboard, a controller, a DAW's virtual port, ...) drives RT2 by playing
 # notes and twisting knobs. The bridge owns one MIDISourceProtocol + one
 # OSCSenderProtocol — it is "just another OSC client" feeding the same
-# /rt2/prompt and /rt2/intensity addresses OSCBridge listens on (loopback UDP),
+# /rt2/prompt and /rt2/intensity addresses RT2Engine listens on (loopback UDP),
 # so nothing in the bridge has to change to support a new control surface.
 #
-# Unlike OSCBridge's chunk-paced latest-wins loop, every MIDI message is
+# Unlike RT2Engine's chunk-paced latest-wins loop, every MIDI message is
 # translated and forwarded individually and immediately: there is no
 # audio-generation cadence to batch around here, and discrete user gestures
 # (note hits, CC sweeps) shouldn't be collapsed into "whatever's freshest".

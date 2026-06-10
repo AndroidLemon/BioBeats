@@ -1,6 +1,10 @@
-# Entrypoint: run the OSC bridge so any OSC-speaking environment can steer RT2.
+# Entrypoint: run the RT2 engine — the one process that owns the model and the
+# generate loop. Every control surface (run.py for biometrics, run_midi.py for
+# MIDI, or any external OSC tool like SuperCollider) steers it by sending /rt2/*
+# messages to the OSC control surface this opens. Launch this first, then point
+# any number of sources at it.
 #
-# `--stub` runs the fully synthetic bridge (StubOSCServer + stub model + null
+# `--stub` runs the fully synthetic engine (StubOSCServer + stub model + null
 # sink, no network/model/audio) and is the CI smoke path. Without it, the real
 # python-osc UDP server, Magenta RT2 client, and sounddevice sink are wired in.
 # Real implementations are imported lazily inside the selected branch so the
@@ -10,12 +14,14 @@ import argparse
 import asyncio
 import logging
 
-from src.integrations.osc_bridge import DEFAULT_HOST, DEFAULT_PORT, OSCBridge
+from src.engine.fsm import State
+from src.engine.rt2_engine import RT2Engine
+from src.integrations.osc_server import DEFAULT_HOST, DEFAULT_PORT
 
 
 def parse_args(argv=None) -> argparse.Namespace:
     """Parse CLI arguments."""
-    parser = argparse.ArgumentParser(description="OSC -> Magenta RT2 bridge")
+    parser = argparse.ArgumentParser(description="Magenta RT2 engine (OSC-controlled)")
     parser.add_argument(
         "--stub",
         action="store_true",
@@ -36,14 +42,14 @@ def parse_args(argv=None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def build_bridge(args: argparse.Namespace) -> OSCBridge:
-    """Construct an OSCBridge with stub or real collaborators."""
+def build_engine(args: argparse.Namespace) -> RT2Engine:
+    """Construct an RT2Engine with stub or real collaborators."""
     if args.stub:
         from stubs.audio_sink_stub import NullAudioSink
         from stubs.mrt2_client_stub import StubMRT2Client
         from stubs.osc_server_stub import StubOSCServer
 
-        return OSCBridge(
+        return RT2Engine(
             StubMRT2Client(),
             NullAudioSink(),
             StubOSCServer(),
@@ -51,10 +57,10 @@ def build_bridge(args: argparse.Namespace) -> OSCBridge:
         )
 
     from src.engine.mrt2_client import MRT2Client
-    from src.integrations.osc_bridge import OSCServer
+    from src.integrations.osc_server import OSCServer
     from src.output.audio_sink import AudioSink
 
-    return OSCBridge(
+    return RT2Engine(
         MRT2Client(size=args.size, default_prompt=args.prompt),
         AudioSink(),
         OSCServer(host=args.host, port=args.port),
@@ -62,16 +68,16 @@ def build_bridge(args: argparse.Namespace) -> OSCBridge:
     )
 
 
-async def main_async(argv=None) -> int:
-    """Build the bridge from args and run it."""
+async def main_async(argv=None) -> State:
+    """Build the engine from args and run it."""
     args = parse_args(argv)
-    bridge = build_bridge(args)
+    engine = build_engine(args)
     # Stub run is unbounded by default; bound it so the CI smoke path terminates.
     max_chunks = 1 if args.stub else None
-    return await bridge.run(max_chunks=max_chunks)
+    return await engine.run(max_chunks=max_chunks)
 
 
-def main(argv=None) -> int:
+def main(argv=None) -> State:
     """CLI entrypoint."""
     logging.basicConfig(level=logging.INFO)
     return asyncio.run(main_async(argv))
