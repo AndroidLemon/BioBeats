@@ -6,64 +6,16 @@
 # makes the FSM exhaustively unit-testable with no async or hardware.
 
 import asyncio
-import enum
 import logging
 from dataclasses import dataclass
 
 from src.ble.hr_monitor import HRMonitorProtocol
+from src.engine.fsm import Event, State, next_state
 from src.engine.mrt2_client import MRT2ClientProtocol
 from src.mapping.hr_to_prompt import hr_to_conditioning
 from src.output.audio_sink import AudioSinkProtocol
 
 logger = logging.getLogger(__name__)
-
-
-class State(enum.Enum):
-    """Pipeline FSM states. Exactly one is active at a time."""
-
-    IDLE = enum.auto()
-    CONNECTING = enum.auto()
-    STREAMING = enum.auto()
-    GENERATING = enum.auto()
-    ERROR = enum.auto()
-
-
-class Event(str, enum.Enum):
-    """Events that drive state transitions."""
-
-    CONNECT = "connect"
-    READY = "ready"
-    HR_TICK = "hr_tick"
-    CHUNK = "chunk"
-    ERROR = "error"
-    RECOVER = "recover"
-
-
-# Legal transitions, excluding the universal ERROR event handled below.
-_TRANSITIONS: dict[tuple[State, Event], State] = {
-    (State.IDLE, Event.CONNECT): State.CONNECTING,
-    (State.CONNECTING, Event.READY): State.STREAMING,
-    (State.STREAMING, Event.HR_TICK): State.GENERATING,
-    (State.GENERATING, Event.CHUNK): State.STREAMING,
-    (State.ERROR, Event.RECOVER): State.IDLE,
-}
-
-
-def next_state(current: State, event: Event) -> State:
-    """Return the next state for (current, event). Pure — no side effects.
-
-    An ERROR event transitions to ERROR from any state. Any other
-    (state, event) pair not in the transition table is illegal and raises
-    ValueError.
-    """
-    if event == Event.ERROR:
-        return State.ERROR
-    try:
-        return _TRANSITIONS[(current, event)]
-    except KeyError:
-        raise ValueError(
-            f"illegal transition: {current.name} --{Event(event).value}-->"
-        ) from None
 
 
 @dataclass
@@ -130,7 +82,7 @@ async def _run_session(ctx: PipelineContext) -> State:
             if not ready:
                 state = next_state(state, Event.READY)  # -> STREAMING
                 ready = True
-            state = next_state(state, Event.HR_TICK)  # -> GENERATING
+            state = next_state(state, Event.TICK)  # -> GENERATING
             ctx.mrt.update_conditioning(hr_to_conditioning(hr, ctx.hr_max))
             # The model call blocks (JAX/MLX); keep the event loop responsive.
             chunk = await asyncio.to_thread(ctx.mrt.generate_chunk)
