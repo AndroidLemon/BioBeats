@@ -57,6 +57,11 @@ def parse_args(argv=None) -> argparse.Namespace:
         default=None,
         help="Optional second OSC destination port. Requires --visuals-host.",
     )
+    parser.add_argument(
+        "--record",
+        default=None,
+        help="Record the /rt2/* control stream to this JSONL file (replayable).",
+    )
     args = parser.parse_args(argv)
     if (args.visuals_host is None) != (args.visuals_port is None):
         parser.error("--visuals-host and --visuals-port must be given together")
@@ -69,23 +74,30 @@ def build_bridge(args: argparse.Namespace) -> BiometricBridge:
         from stubs.hr_monitor_stub import StubHRMonitor
         from stubs.osc_client_stub import StubOSCClient
 
-        # interval=0 so the stub ramp doesn't sleep between readings.
-        return BiometricBridge(
-            StubHRMonitor(), StubOSCClient(), hr_max=args.hr_max, interval=0
-        )
+        source = StubHRMonitor()
+        sender = StubOSCClient()
+        interval = 0.0  # stub ramp shouldn't sleep between readings
+    else:
+        from src.ble.hr_monitor import HRMonitor
+        from src.integrations.osc_client import OSCClient
 
-    from src.ble.hr_monitor import HRMonitor
-    from src.integrations.osc_client import OSCClient
+        source = HRMonitor()
+        sender = OSCClient(host=args.osc_host, port=args.osc_port)
+        if args.visuals_host is not None:
+            from src.integrations.fanout_osc_sender import FanoutOSCSender
 
-    sender = OSCClient(host=args.osc_host, port=args.osc_port)
-    if args.visuals_host is not None:
-        from src.integrations.fanout_osc_sender import FanoutOSCSender
+            sender = FanoutOSCSender(
+                [sender, OSCClient(host=args.visuals_host, port=args.visuals_port)]
+            )
+        interval = 1.0
 
-        sender = FanoutOSCSender(
-            [sender, OSCClient(host=args.visuals_host, port=args.visuals_port)]
-        )
+    # Record outermost so the log captures exactly what's sent (incl. to fanout).
+    if args.record:
+        from src.integrations.control_log import RecordingOSCSender
 
-    return BiometricBridge(HRMonitor(), sender, hr_max=args.hr_max)
+        sender = RecordingOSCSender(sender, args.record)
+
+    return BiometricBridge(source, sender, hr_max=args.hr_max, interval=interval)
 
 
 async def main_async(argv=None) -> int:

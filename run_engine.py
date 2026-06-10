@@ -39,6 +39,11 @@ def parse_args(argv=None) -> argparse.Namespace:
         default="ambient",
         help="Initial style prompt before any OSC message arrives.",
     )
+    parser.add_argument(
+        "--record-audio",
+        default=None,
+        help="Record generated audio to this WAV file (48kHz stereo, 16-bit).",
+    )
     return parser.parse_args(argv)
 
 
@@ -49,23 +54,24 @@ def build_engine(args: argparse.Namespace) -> RT2Engine:
         from stubs.mrt2_client_stub import StubMRT2Client
         from stubs.osc_server_stub import StubOSCServer
 
-        return RT2Engine(
-            StubMRT2Client(),
-            NullAudioSink(),
-            StubOSCServer(),
-            default_prompt=args.prompt,
-        )
+        mrt = StubMRT2Client()
+        sink = NullAudioSink()
+        server = StubOSCServer()
+    else:
+        from src.engine.mrt2_client import MRT2Client
+        from src.integrations.osc_server import OSCServer
+        from src.output.audio_sink import AudioSink
 
-    from src.engine.mrt2_client import MRT2Client
-    from src.integrations.osc_server import OSCServer
-    from src.output.audio_sink import AudioSink
+        mrt = MRT2Client(size=args.size, default_prompt=args.prompt)
+        sink = AudioSink()
+        server = OSCServer(host=args.host, port=args.port)
 
-    return RT2Engine(
-        MRT2Client(size=args.size, default_prompt=args.prompt),
-        AudioSink(),
-        OSCServer(host=args.host, port=args.port),
-        default_prompt=args.prompt,
-    )
+    if args.record_audio:
+        from src.output.recording_audio_sink import RecordingAudioSink
+
+        sink = RecordingAudioSink(sink, args.record_audio)
+
+    return RT2Engine(mrt, sink, server, default_prompt=args.prompt)
 
 
 async def main_async(argv=None) -> State:

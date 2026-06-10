@@ -59,6 +59,11 @@ def parse_args(argv=None) -> argparse.Namespace:
         default=None,
         help="Optional second OSC destination port. Requires --visuals-host.",
     )
+    parser.add_argument(
+        "--record",
+        default=None,
+        help="Record the /rt2/* control stream to this JSONL file (replayable).",
+    )
     args = parser.parse_args(argv)
     if (args.visuals_host is None) != (args.visuals_port is None):
         parser.error("--visuals-host and --visuals-port must be given together")
@@ -71,20 +76,28 @@ def build_bridge(args: argparse.Namespace) -> MIDIBridge:
         from stubs.midi_source_stub import StubMIDISource
         from stubs.osc_client_stub import StubOSCClient
 
-        return MIDIBridge(StubMIDISource(), StubOSCClient())
+        source = StubMIDISource()
+        sender = StubOSCClient()
+    else:
+        from src.integrations.osc_client import OSCClient
+        from src.midi.midi_source import MIDISource
 
-    from src.integrations.osc_client import OSCClient
-    from src.midi.midi_source import MIDISource
+        source = MIDISource(port_name=args.port_name)
+        sender = OSCClient(host=args.osc_host, port=args.osc_port)
+        if args.visuals_host is not None:
+            from src.integrations.fanout_osc_sender import FanoutOSCSender
 
-    sender = OSCClient(host=args.osc_host, port=args.osc_port)
-    if args.visuals_host is not None:
-        from src.integrations.fanout_osc_sender import FanoutOSCSender
+            sender = FanoutOSCSender(
+                [sender, OSCClient(host=args.visuals_host, port=args.visuals_port)]
+            )
 
-        sender = FanoutOSCSender(
-            [sender, OSCClient(host=args.visuals_host, port=args.visuals_port)]
-        )
+    # Record outermost so the log captures exactly what's sent (incl. to fanout).
+    if args.record:
+        from src.integrations.control_log import RecordingOSCSender
 
-    return MIDIBridge(MIDISource(port_name=args.port_name), sender)
+        sender = RecordingOSCSender(sender, args.record)
+
+    return MIDIBridge(source, sender)
 
 
 async def main_async(argv=None) -> int:
