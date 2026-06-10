@@ -62,8 +62,12 @@ def parse_args(argv=None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def selected_names(only: str | None, skip: str | None) -> list[str] | None:
-    """Resolve --only/--skip into a list of check names (or None for all)."""
+def selected_names(only: str | None, skip: str | None) -> list[str]:
+    """Resolve --only/--skip into the list of check names to run.
+
+    Defaults to all checks (CHECK_ORDER) when --only is omitted, then drops any
+    --skip names. Always returns a concrete list (never None).
+    """
     names = CHECK_ORDER if only is None else [n.strip() for n in only.split(",")]
     if skip:
         skipped = {n.strip() for n in skip.split(",")}

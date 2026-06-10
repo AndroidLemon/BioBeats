@@ -126,16 +126,25 @@ def check_env(config: DoctorConfig) -> CheckResult:
     return CheckResult("env", CheckStatus.PASS, detail)
 
 
+def _is_engine_host() -> bool:
+    """True if this machine can run the RT2 engine (Apple-Silicon Mac / MLX).
+
+    Off-target hosts run only the control-surface adapters, so engine-only
+    capabilities (audio output, RT2/MLX) are informational there, not failures.
+    """
+    import platform
+
+    return platform.system() == "Darwin" and platform.machine() == "arm64"
+
+
 def check_apple_silicon(config: DoctorConfig) -> CheckResult:
     """RT2 runs on MLX, which is Apple-Silicon only. Warn (not fail) elsewhere —
     the OSC/MIDI/biometric adapters still work off-Mac; only the engine needs it.
     """
     import platform
 
-    machine = platform.machine()
-    system = platform.system()
-    detail = f"{system} {machine}"
-    if system == "Darwin" and machine == "arm64":
+    detail = f"{platform.system()} {platform.machine()}"
+    if _is_engine_host():
         return CheckResult("apple-silicon", CheckStatus.PASS, detail)
     return CheckResult(
         "apple-silicon",
@@ -176,9 +185,13 @@ def check_audio(config: DoctorConfig) -> CheckResult:
     try:
         import sounddevice as sd
     except Exception as exc:  # noqa: BLE001 - import/PortAudio failure is the signal
+        # On the engine's target rig, run_engine.py wires in a real AudioSink, so
+        # missing PortAudio is a genuine FAIL. On other hosts the engine isn't
+        # applicable (only adapters run), so it's just informational (SKIP).
+        status = CheckStatus.FAIL if _is_engine_host() else CheckStatus.SKIP
         return CheckResult(
             name,
-            CheckStatus.SKIP,
+            status,
             f"sounddevice unavailable: {exc}",
             hint="install PortAudio (`brew install portaudio`) and `uv sync`",
         )
@@ -288,10 +301,14 @@ def check_rt2_model(config: DoctorConfig) -> CheckResult:
         from src.engine.mrt2_client import CHUNK_FRAMES
         from magenta_rt.mlx.system import MagentaRT2SystemMlxfn
 
-        start = time.monotonic()
         mrt = MagentaRT2SystemMlxfn(size=config.model_size)
         style = mrt.embed_style("ambient")
-        mrt.generate(style=style, frames=CHUNK_FRAMES, state=None)
+        # Exclude construction/embedding and a cold-start chunk from the timing:
+        # the real-time budget is about STEADY-STATE generation, so warm up once
+        # (discarded) and time a second, state-threaded chunk.
+        _, state = mrt.generate(style=style, frames=CHUNK_FRAMES, state=None)
+        start = time.monotonic()
+        mrt.generate(style=style, frames=CHUNK_FRAMES, state=state)
         elapsed = time.monotonic() - start
     except Exception as exc:  # noqa: BLE001 - import/build/generate failure
         return CheckResult(
@@ -300,10 +317,10 @@ def check_rt2_model(config: DoctorConfig) -> CheckResult:
             f"generation failed: {exc}",
             hint="RT2 requires an Apple-Silicon Mac (MLX); check the model download",
         )
-    # 2s of audio per chunk: anything over ~2s/chunk can't keep up in real time.
+    # CHUNK_FRAMES is 2s of audio: a steady-state chunk over ~2s can't keep up.
     budget = "real-time OK" if elapsed < 2.0 else "SLOWER THAN REAL TIME"
     return CheckResult(
-        name, CheckStatus.PASS, f"generated a chunk in {elapsed:.1f}s ({budget})"
+        name, CheckStatus.PASS, f"steady-state chunk in {elapsed:.1f}s ({budget})"
     )
 
 
