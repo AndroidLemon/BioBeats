@@ -56,7 +56,7 @@ tricks are still unused.
   on-device first — strictly RT2, verify don't guess), plus engine handlers + a
   mapping module.
 
-- [~] **Live CFG / temperature / top_k controls** (`/rt2/cfg/*`,
+- [ ] **Live CFG / temperature / top_k controls** (`/rt2/cfg/*`,
   `/rt2/temperature`) · **S–M** — *Partially shipped (PR #9):* `/rt2/cfg/notes`
   and `/rt2/cfg/drums` are live OSC params now. Still to do: `/rt2/temperature`
   and `/rt2/top_k` (the global sampling knobs). Expose RT2's "how strictly do you
