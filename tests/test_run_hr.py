@@ -1,9 +1,9 @@
-# Tests for the run.py entrypoint: argument parsing, stub bridge wiring, the
+# Tests for the run_hr.py entrypoint: argument parsing, stub bridge wiring, the
 # visuals-flag validation, and a full stub smoke run (CI-safe, no BLE/network).
 
 import pytest
 
-from run import build_bridge, main, parse_args
+from run_hr import build_bridge, main, parse_args
 from src.integrations.biometric_bridge import BiometricBridge
 from stubs.hr_monitor_stub import StubHRMonitor
 from stubs.osc_client_stub import StubOSCClient

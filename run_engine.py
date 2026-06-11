@@ -1,5 +1,5 @@
 # Entrypoint: run the RT2 engine — the one process that owns the model and the
-# generate loop. Every control surface (run.py for biometrics, run_midi.py for
+# generate loop. Every control surface (run_hr.py for biometrics, run_midi.py for
 # MIDI, or any external OSC tool like SuperCollider) steers it by sending /rt2/*
 # messages to the OSC control surface this opens. Launch this first, then point
 # any number of sources at it.

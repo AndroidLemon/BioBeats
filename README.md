@@ -48,9 +48,9 @@ src/
   diagnostics/doctor.py  # per-layer preflight checks for the real rig
 stubs/                   # deterministic, hardware-free implementations of each Protocol
 tests/                   # mirrors src/
-run_engine.py            # the RT2 engine (real or --stub) — launch first
-run.py                   # biometric (HR) → OSC adapter (real or --stub)
-run_midi.py              # MIDI → OSC adapter (real or --stub)
+run_engine.py            # the RT2 engine (real or --stub) — the program; launch first
+run_hr.py                # biometric (HR) → OSC source adapter (real or --stub)
+run_midi.py              # MIDI → OSC source adapter (real or --stub)
 replay.py                # re-emit a recorded control log over OSC
 run_doctor.py            # preflight diagnostics for the real rig
 ```
@@ -76,8 +76,9 @@ Launch the engine once, then point any number of sources at it (loopback UDP):
 # 1) the engine (owns the model) — Apple-Silicon Mac, RT2 uses MLX
 python run_engine.py --size mrt2_small      # dev model   (--size mrt2_base for demo)
 
-# 2) one or more control surfaces, in other shells
-python run.py                                # heart rate → /rt2/*
+# 2) zero or more control surfaces, in other shells (the engine already plays
+#    from --prompt on its own; sources just steer it)
+python run_hr.py                             # heart rate → /rt2/*
 python run_midi.py --port-name "Dubler"      # MIDI → /rt2/*
 # …or an external OSC tool (SuperCollider, TouchOSC) sending /rt2/* to 127.0.0.1:5005
 ```
@@ -132,7 +133,7 @@ tightly it obeys each channel — map them to an LFO or knob for live control.
 A source adapter owns one input Protocol + one `OSCSenderProtocol` and forwards
 translated control onto `/rt2/*`. Two ship today:
 
-- **Biometric** (`run.py` / `BiometricBridge`): HR → `hr_to_prompt` →
+- **Biometric** (`run_hr.py` / `BiometricBridge`): HR → `hr_to_prompt` →
   `/rt2/prompt` + `/rt2/intensity`. **Latest-wins** — HR is a continuously
   resampled signal, so only the freshest reading matters at a send boundary.
 - **MIDI** (`run_midi.py` / `MIDIBridge`): every standard MIDI message →
@@ -164,7 +165,7 @@ Keep a take, then reproduce it. Both recorders are decorators (like
 
 ```bash
 # record the control stream a source emits (replayable JSONL), on any adapter
-python run.py --record take.jsonl
+python run_hr.py --record take.jsonl
 python run_midi.py --record take.jsonl
 
 # record the engine's generated audio to a WAV (48kHz stereo, 16-bit)
@@ -182,7 +183,7 @@ faithfully.
 
 ## Driving visuals too (e.g. Hydra)
 
-`--visuals-host`/`--visuals-port` (on `run.py` and `run_midi.py`) mirror every
+`--visuals-host`/`--visuals-port` (on `run_hr.py` and `run_midi.py`) mirror every
 forwarded message to a second OSC destination via `FanoutOSCSender` — a thin
 `OSCSenderProtocol` that fans one send out to several. The same control stream
 steering RT2 can drive a visuals relay in lockstep, with no changes to any

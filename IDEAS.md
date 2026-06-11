@@ -19,15 +19,26 @@ real project. Each item leads with the case for doing it.
 
 ---
 
-## Near-term sequence (agreed)
+## Near-term sequence (agreed) — ✅ all shipped
 
 The intended opening order — de-risk first, then keepability, then the big
-musical unlock:
+musical unlock — is now landed on `main`:
 
-1. **Real-hardware shakeout** (S–M) — prove the real path works end to end.
-2. **Session recording** (S–M) — cheap, makes every later experiment keepable.
-3. **`/rt2/notes` + `/rt2/drums` conditioning** (L) — the biggest musical unlock.
-4. **Dubler 2 / MIDI expressivity** (S–M) — rides in right behind the notes channel.
+1. ✅ **Real-hardware shakeout** (S–M) — `run_doctor.py` preflight shipped (PR #7).
+   *On-device pass still owed* — the tooling exists; it hasn't been run on the
+   real Mac + OTBeat + RT2 rig yet. That's the next physical step.
+2. ✅ **Session recording** (S–M) — control-log + WAV decorators + `replay.py` (PR #8).
+3. ✅ **`/rt2/notes` + `/rt2/drums` conditioning** (L) — sparse OSC note control (PR #9).
+4. ✅ **Dubler 2 / MIDI expressivity** (S–M) — MIDI plays RT2's harmony (PR #10).
+
+The engine/adapter split that motivated all of this is now reflected in the
+entrypoints too: `run_engine.py` is *the program* (a standalone Magenta RT2
+wrapper that plays from `--prompt` with no source attached), and the sources are
+symmetric peers — `run_hr.py`, `run_midi.py`, or any external OSC tool.
+
+**What's next** (pick up from the themed sections below): live temperature/top_k
+to finish the CFG knobs, the audio-style "cloning" source, source merging/layering
+(HR + MIDI at once), or the style-crossfade glide.
 
 ---
 
@@ -36,7 +47,7 @@ musical unlock:
 We currently drive only `style` (prompt) + advisory `intensity`. RT2's headline
 tricks are still unused.
 
-- [ ] **`/rt2/notes` + `/rt2/drums` channels** · **L** — *The* RT2 superpower:
+- [x] **`/rt2/notes` + `/rt2/drums` channels** · **L** — ✅ shipped (PR #9). *The* RT2 superpower:
   hold a chord and the model generates an ensemble that follows your harmony.
   Today MIDI just picks a low/mid/high zone; with real note conditioning, MIDI
   (and Dubler 2) becomes actual playing — pitch, harmony, rhythm. Biggest musical
@@ -45,9 +56,11 @@ tricks are still unused.
   on-device first — strictly RT2, verify don't guess), plus engine handlers + a
   mapping module.
 
-- [ ] **Live CFG / temperature / top_k controls** (`/rt2/cfg/*`,
-  `/rt2/temperature`) · **S–M** — Expose RT2's "how strictly do you obey each
-  channel" knobs as live OSC params. Turns the rig from a toggle into a
+- [~] **Live CFG / temperature / top_k controls** (`/rt2/cfg/*`,
+  `/rt2/temperature`) · **S–M** — *Partially shipped (PR #9):* `/rt2/cfg/notes`
+  and `/rt2/cfg/drums` are live OSC params now. Still to do: `/rt2/temperature`
+  and `/rt2/top_k` (the global sampling knobs). Expose RT2's "how strictly do you
+  obey each channel" knobs as live OSC params. Turns the rig from a toggle into a
   performance instrument: dial "follow my notes tightly" vs. "roam freely," and
   map it to an LFO or knob. Pairs naturally with the notes channel.
 
@@ -58,10 +71,12 @@ tricks are still unused.
 
 ## New sources — prove and exploit the extensibility
 
-- [ ] **Dubler 2 / MIDI expressivity** · **S** (M with notes channel) — The MIDI
-  adapter already exists and the hardware is on hand, so this is the
-  closest-to-free win. Voice → MIDI → harmony is a killer, demoable thread and
-  the concrete payoff of the engine/adapter refactor.
+- [x] **Dubler 2 / MIDI expressivity** · **S** (M with notes channel) — ✅ shipped
+  (PR #10): MIDI notes now drive RT2's harmony via the notes channel (GM ch.10 →
+  drums), not a style zone. The MIDI adapter already existed and the hardware is
+  on hand, so this was the closest-to-free win. Voice → MIDI → harmony is a
+  killer, demoable thread and the concrete payoff of the engine/adapter refactor.
+  *Still owed: the on-device Dubler 2 voice → MIDI test (needs the Mac).*
 
 - [ ] **Audio-style "cloning" source** · **M–L** — RT2's MusicCoCa embeds *audio*
   as a style target too ("make it sound like this snippet"). A source that grabs
@@ -89,10 +104,11 @@ tricks are still unused.
 
 ## Outputs — make sessions keepable
 
-- [ ] **Session recording** · **S–M** — Tee the audio sink to a WAV and log the
-  timestamped `/rt2/*` control stream. You'll want to keep good takes, and a
-  replayable control log gives deterministic real-session debugging + regression
-  material for free. High value-to-cost; do it early.
+- [x] **Session recording** · **S–M** — ✅ shipped (PR #8). Tees the audio sink to
+  a WAV (`run_engine.py --record-audio`) and logs the timestamped `/rt2/*` control
+  stream (`--record` on any source), replayable via `replay.py`. Both are pure
+  `Protocol` decorators — no engine/adapter changes. A replayable control log
+  gives deterministic real-session debugging + regression material for free.
 
 - [ ] **Hydra visuals, for real** · **M** — Fanout already exists; build the
   actual `hydra-osc` patch mapping `/rt2/*` → visual params. Completes the AV
@@ -100,11 +116,12 @@ tricks are still unused.
 
 ## Robustness & groundwork — de-risk the fun
 
-- [ ] **Real-hardware shakeout** · **S–M** — A guided script/checklist that
-  exercises Mac + OTBeat BLE pairing + RT2 model download + audio device, with
-  diagnostics. Every idea above assumes the real path works, and it hasn't been
-  run on hardware yet. The sooner the integration gremlins surface, the cheaper
-  they are. Ranked #1.
+- [x] **Real-hardware shakeout** · **S–M** — ✅ tooling shipped (PR #7):
+  `run_doctor.py` exercises Python/MLX + OSC port + audio device + OTBeat BLE +
+  RT2 model as independent, individually-skippable checks. **The on-device run
+  itself is still owed** — the checklist exists but hasn't been pointed at the
+  real Mac + OTBeat + RT2 rig. Every idea above assumes the real path works; the
+  sooner the integration gremlins surface, the cheaper they are. Ranked #1.
 
 - [ ] **Latency / underrun instrumentation** · **S** — Measure generation time
   against the 2-second chunk budget and watch buffer health. Real-time audio
