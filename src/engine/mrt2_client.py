@@ -87,6 +87,12 @@ class MRT2Client:
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="mrt2-mlx")
         self._prompt = default_prompt
         self._state = None
+        # Note/drum/CFG conditioning, threaded into each generate() call. None
+        # means masked (the model is free), matching RT2's generate() defaults.
+        self._notes: list[int] | None = None
+        self._drums: list[int] | None = None
+        self._cfg_notes: float | None = None
+        self._cfg_drums: float | None = None
         self._mrt, self._style = self._executor.submit(
             self._load_backend, size, default_prompt
         ).result()
@@ -100,15 +106,32 @@ class MRT2Client:
         return mrt, mrt.embed_style(default_prompt)
 
     def update_conditioning(self, conditioning: dict) -> None:
-        """Re-embed the style only when the prompt actually changes."""
+        """Apply the latest conditioning. Re-embed the style only on prompt change.
+
+        notes/drums/cfg are cheap to set and stored for the next generate():
+        notes is RT2's 128-int pitch-state vector (or None), drums a 1-int list
+        (or None), and the CFG scales are per-channel floats (or None for the
+        model's defaults).
+        """
         prompt = conditioning["prompt"]
         if prompt != self._prompt:
             self._prompt = prompt
             self._style = self._executor.submit(self._mrt.embed_style, prompt).result()
+        self._notes = conditioning.get("notes")
+        self._drums = conditioning.get("drums")
+        self._cfg_notes = conditioning.get("cfg_notes")
+        self._cfg_drums = conditioning.get("cfg_drums")
 
     def generate_chunk(self) -> np.ndarray:
         """Generate one 2s chunk, threading the streaming state forward."""
         wav, self._state = self._executor.submit(
-            self._mrt.generate, style=self._style, frames=CHUNK_FRAMES, state=self._state
+            self._mrt.generate,
+            style=self._style,
+            notes=self._notes,
+            drums=self._drums,
+            cfg_notes=self._cfg_notes,
+            cfg_drums=self._cfg_drums,
+            frames=CHUNK_FRAMES,
+            state=self._state,
         ).result()
         return np.asarray(wav.samples, dtype=np.float32)
