@@ -138,10 +138,17 @@ translated control onto `/rt2/*`. Two ship today:
 
 ```
 # MIDI mapping (src/mapping/midi_to_conditioning.py — pure, unit-tested):
-note_on  (note, velocity)  ->  /rt2/prompt     (note picks a low/mid/high zone)
-                           ->  /rt2/intensity  (from velocity, continuous 0..1)
-control_change (any CC)    ->  /rt2/intensity  (from CC value, continuous 0..1)
+note_on  (note, velocity)  ->  /rt2/note/on  <pitch>   (play it — RT2 follows your harmony)
+                           ->  /rt2/intensity <0..1>    (from velocity)
+note_off / note_on vel 0   ->  /rt2/note/off <pitch>    (release it)
+note on/off on GM ch.10    ->  /rt2/drum 1 / 0          (drums)
+control_change (any CC)    ->  /rt2/intensity <0..1>    (from CC value)
 ```
+
+Played notes drive RT2's **harmony**, not a style preset — hold a chord and the
+model generates an ensemble that follows it. Style/prompt comes from another
+source (HR, an external OSC tool) or the engine default, so notes stay pure
+harmony.
 
 To add another (e.g. a gamepad, a sensor), write a `*_bridge.py` adapter + a
 pure mapping module and point it at the engine — nothing in `rt2_engine.py`
