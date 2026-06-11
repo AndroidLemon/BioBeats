@@ -53,11 +53,14 @@ def _coerce_int(address: str, args) -> int | None:
     if not args:
         logger.warning("ignoring %s: no argument", address)
         return None
-    try:
-        return int(args[0])
-    except (TypeError, ValueError):
-        logger.warning("ignoring %s: non-integer argument %r", address, args[0])
+    value = args[0]
+    # Require an actual int (OSC 'i' type). Don't coerce floats/strings — a float
+    # pitch like 60.9 must be ignored, not silently truncated to a valid pitch.
+    # bool is an int subclass, so exclude it explicitly.
+    if isinstance(value, bool) or not isinstance(value, int):
+        logger.warning("ignoring %s: non-integer argument %r", address, value)
         return None
+    return value
 
 
 class RT2Engine:

@@ -131,9 +131,12 @@ def test_malformed_messages_do_not_raise():
     server.dispatch("/rt2/intensity", "loud")  # non-numeric
     server.dispatch("/rt2/note/on")  # no arg
     server.dispatch("/rt2/note/on", "x")  # non-integer
+    server.dispatch("/rt2/note/on", 60.5)  # float pitch -> ignored, not truncated
+    server.dispatch("/rt2/drum", 1.9)  # float -> ignored, not truncated to 1
     server.dispatch("/rt2/cfg/notes", "x")  # non-numeric
     snap = engine._snapshot_conditioning()
     assert snap["notes"] is None and snap["cfg_notes"] is None
+    assert snap["drums"] is None
 
 
 # --- run loop --------------------------------------------------------------
