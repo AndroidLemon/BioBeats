@@ -39,3 +39,21 @@ def test_build_bridge_stub_wires_stubs():
 def test_main_stub_smoke_run():
     # One reading -> /rt2/prompt + /rt2/intensity = 2 messages forwarded.
     assert main(["--stub"]) == 2
+
+
+def test_record_flag_wraps_sender(tmp_path):
+    from src.integrations.control_log import RecordingOSCSender
+
+    log = tmp_path / "take.jsonl"
+    bridge = build_bridge(parse_args(["--stub", "--record", str(log)]))
+    assert isinstance(bridge._sender, RecordingOSCSender)
+    bridge._sender.close()
+
+
+def test_record_flag_writes_control_log(tmp_path):
+    from src.integrations.control_log import read_control_log
+
+    log = tmp_path / "take.jsonl"
+    assert main(["--stub", "--record", str(log)]) == 2
+    events = read_control_log(log)
+    assert [e.address for e in events] == ["/rt2/prompt", "/rt2/intensity"]
