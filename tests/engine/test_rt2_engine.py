@@ -4,6 +4,7 @@
 # no python-osc, no model, no audio device).
 
 import asyncio
+import logging
 
 from src.engine.fsm import State
 from src.engine.rt2_engine import RT2Engine
@@ -153,6 +154,18 @@ async def test_run_streams_chunks_and_applies_conditioning():
     # The latest snapshot reached the model: prompt + the held note.
     assert mrt.conditioning["prompt"] == "ambient drone"
     assert mrt.conditioning["notes"][60] in (1, 2)
+
+
+async def test_run_tracks_latency_and_logs_session_summary(caplog):
+    engine, _, _, _ = _make_engine()
+    with caplog.at_level(logging.INFO):
+        await engine.run(max_chunks=2)
+    assert engine.latency.chunks == 2
+    # Stub chunks are (96000, 2) @ 48kHz -> a 2.0s real-time budget per chunk.
+    assert engine.latency.last_budget_seconds == 2.0
+    # The stub generates near-instantly, so nothing blew the budget.
+    assert engine.latency.over_budget == 0
+    assert "latency: 2 chunks" in caplog.text
 
 
 async def test_run_pushes_default_prompt_without_osc():

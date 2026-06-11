@@ -31,11 +31,13 @@
 import asyncio
 import logging
 import threading
+import time
 
+from src.diagnostics.latency import ChunkBudgetTracker
 from src.engine.fsm import Event, State, next_state
 from src.engine.mrt2_client import MRT2ClientProtocol
 from src.integrations.osc_server import OSCServerProtocol
-from src.output.audio_sink import AudioSinkProtocol
+from src.output.audio_sink import SAMPLE_RATE, AudioSinkProtocol
 
 logger = logging.getLogger(__name__)
 
@@ -101,6 +103,9 @@ class RT2Engine:
         self._running = False
         self._max_chunks: int | None = None
         self._produced = 0
+        # Per-session generation timing vs. the chunk's real-time playback
+        # budget — the number that says whether this model size keeps up live.
+        self.latency = ChunkBudgetTracker()
         self._register()
 
     def _register(self) -> None:
@@ -238,7 +243,17 @@ class RT2Engine:
             self._mrt.update_conditioning(self._snapshot_conditioning())
             state = next_state(state, Event.TICK)  # -> GENERATING
             # The model call blocks (MLX); keep the event loop responsive.
+            started = time.perf_counter()
             chunk = await asyncio.to_thread(self._mrt.generate_chunk)
+            gen_seconds = time.perf_counter() - started
+            budget_seconds = chunk.shape[0] / SAMPLE_RATE
+            if self.latency.record(gen_seconds, budget_seconds):
+                logger.warning(
+                    "chunk %d generated in %.2fs, over its %.2fs real-time budget",
+                    self._produced,
+                    gen_seconds,
+                    budget_seconds,
+                )
             self._sink.write(chunk)
             self._produced += 1
             state = next_state(state, Event.CHUNK)  # -> STREAMING
@@ -264,6 +279,7 @@ class RT2Engine:
         self._running = True
         self._max_chunks = max_chunks
         self._produced = 0
+        self.latency = ChunkBudgetTracker()  # fresh stats per session
         serve_task = asyncio.create_task(asyncio.to_thread(self._server.serve))
         state = State.IDLE
         attempt = 0
@@ -282,6 +298,8 @@ class RT2Engine:
                     state = next_state(state, Event.RECOVER)  # -> IDLE, retry
         finally:
             self._running = False
+            if self.latency.chunks:
+                logger.info("%s", self.latency.summary())
             self._server.shutdown()
             self._sink.stop()
             # serve() returns once shutdown() lands. Surface (don't swallow) a

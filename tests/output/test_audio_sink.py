@@ -104,6 +104,97 @@ def test_callback_spans_multiple_chunks(monkeypatch):
     assert np.allclose(out[2:], 2.0)
 
 
+# --- buffer health -----------------------------------------------------------
+
+
+def test_startup_silence_is_not_an_underrun(monkeypatch):
+    captured = _install_fake_sounddevice(monkeypatch)
+    sink = AudioSink(blocksize=4)
+    sink.start()
+    out = np.zeros((4, 2), dtype=np.float32)
+    captured["callback"](out, 4, None, None)  # nothing written yet: priming gap
+    captured["callback"](out, 4, None, None)
+    assert sink.underruns == 0
+
+
+def test_running_dry_after_playback_counts_one_underrun_per_dry_spell(monkeypatch):
+    captured = _install_fake_sounddevice(monkeypatch)
+    sink = AudioSink(blocksize=4)
+    sink.start()
+    out = np.zeros((4, 2), dtype=np.float32)
+
+    sink.write(np.ones((4, 2), dtype=np.float32))
+    captured["callback"](out, 4, None, None)  # plays the buffer
+    captured["callback"](out, 4, None, None)  # dry -> underrun
+    captured["callback"](out, 4, None, None)  # still the same dry spell
+    assert sink.underruns == 1
+
+    sink.write(np.ones((4, 2), dtype=np.float32))
+    captured["callback"](out, 4, None, None)  # playing again
+    captured["callback"](out, 4, None, None)  # dry again -> a second spell
+    assert sink.underruns == 2
+
+
+def test_partial_fill_counts_as_an_underrun(monkeypatch):
+    captured = _install_fake_sounddevice(monkeypatch)
+    sink = AudioSink(blocksize=4)
+    sink.start()
+    sink.write(np.ones((2, 2), dtype=np.float32))  # half a block
+    out = np.zeros((4, 2), dtype=np.float32)
+    captured["callback"](out, 4, None, None)  # ran dry mid-block
+    assert sink.underruns == 1
+
+
+def test_buffered_frames_reports_unplayed_queue(monkeypatch):
+    captured = _install_fake_sounddevice(monkeypatch)
+    sink = AudioSink(blocksize=4)
+    sink.start()
+    sink.write(np.ones((6, 2), dtype=np.float32))
+    assert sink.buffered_frames() == 6
+    out = np.zeros((4, 2), dtype=np.float32)
+    captured["callback"](out, 4, None, None)
+    assert sink.buffered_frames() == 2
+
+
+def test_stop_reports_underruns_and_ignores_teardown_drain(monkeypatch, caplog):
+    captured = _install_fake_sounddevice(monkeypatch)
+    sink = AudioSink(blocksize=4)
+    sink.start()
+    out = np.zeros((4, 2), dtype=np.float32)
+    sink.write(np.ones((4, 2), dtype=np.float32))
+    captured["callback"](out, 4, None, None)
+    captured["callback"](out, 4, None, None)  # one real dry spell
+    sink.write(np.ones((4, 2), dtype=np.float32))
+    captured["callback"](out, 4, None, None)  # playing again at stop time
+
+    real_stop = sink._stream.stop
+
+    def draining_stop():
+        # PortAudio keeps pulling while stop() drains; the buffer running
+        # out here is expected, not an underrun.
+        captured["callback"](out, 4, None, None)
+        real_stop()
+
+    monkeypatch.setattr(sink._stream, "stop", draining_stop)
+    with caplog.at_level("WARNING"):
+        sink.stop()
+    assert sink.underruns == 1  # the teardown drain didn't count
+    assert "1 underrun" in caplog.text
+
+
+def test_clean_session_reports_no_underruns(monkeypatch, caplog):
+    captured = _install_fake_sounddevice(monkeypatch)
+    sink = AudioSink(blocksize=4)
+    sink.start()
+    out = np.zeros((4, 2), dtype=np.float32)
+    sink.write(np.ones((4, 2), dtype=np.float32))
+    captured["callback"](out, 4, None, None)
+    with caplog.at_level("INFO"):
+        sink.stop()
+    assert sink.underruns == 0
+    assert "no underruns" in caplog.text
+
+
 def test_partial_chunk_consumed_across_callbacks(monkeypatch):
     captured = _install_fake_sounddevice(monkeypatch)
     sink = AudioSink(blocksize=2)
