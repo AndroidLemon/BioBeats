@@ -4,21 +4,29 @@
 # or any external OSC tool like SuperCollider / TouchOSC) feeds this engine the
 # same way: by sending /rt2/* messages to its OSC control surface. The engine
 # owns the single MRT2 client + audio sink, runs the FSM lifecycle
-# (src/engine/fsm.py) with bounded error recovery, and applies the latest
-# conditioning at each chunk boundary. Because all model calls funnel through
-# one MRT2Client (and its single MLX thread), generation must live in exactly
-# one place — here.
+# (src/engine/fsm.py) with bounded error recovery, and snapshots the current
+# conditioning at each chunk boundary. Because all model calls funnel through one
+# MRT2Client (and its single MLX thread), generation must live in exactly one
+# place — here.
 #
 # It depends only on MRT2ClientProtocol, AudioSinkProtocol, and OSCServerProtocol
 # — never on a concrete model version or OSC library. python-osc is lazy-imported
 # in the real OSCServer, so this module imports clean on CI.
 #
 # OSC address space (control-rate; one model + one sink behind it):
-#   /rt2/prompt      s   set the style prompt (re-embeds only on change)
+#   /rt2/prompt      s   style prompt (re-embeds only on change)
 #   /rt2/intensity   f   advisory 0..1 intensity carried in the conditioning
-# Extension points (handlers map 1:1 to addresses, so adding a channel is one
-# method + one self._server.map call): /rt2/notes, /rt2/drums, /rt2/cfg/* would
-# slot in here once MRT2Client consumes those conditioning keys.
+#   /rt2/note/on     i   pitch 0-127 pressed (an onset this chunk, then held)
+#   /rt2/note/off    i   pitch 0-127 released
+#   /rt2/drum        i   -1 masked / 0 no-drum / 1 play-drum
+#   /rt2/cfg/notes   f   classifier-free-guidance scale for notes  (-1..7)
+#   /rt2/cfg/drums   f   classifier-free-guidance scale for drums  (-1..7)
+#
+# Notes use the SPARSE protocol: senders just press/release pitches, and the
+# engine (which owns chunk boundaries) tracks held pitches and expands them into
+# RT2's 128-int pitch-state vector each chunk — a pitch struck since the last
+# chunk is an onset (2), one still held is a continuation (1), the rest are off
+# (0). With nothing held, notes are left masked (None) so the model roams.
 
 import asyncio
 import logging
@@ -31,16 +39,39 @@ from src.output.audio_sink import AudioSinkProtocol
 
 logger = logging.getLogger(__name__)
 
+NUM_PITCHES = 128  # RT2 notes conditioning is one state per MIDI pitch 0-127
+CFG_MIN = -1.0
+CFG_MAX = 7.0
+
+
+def _coerce_int(address: str, args) -> int | None:
+    """Parse a single int OSC arg, or None (logged) if missing/non-integer.
+
+    Handlers run on the OSC server thread, so a bad message must be ignored
+    rather than raise and kill that thread.
+    """
+    if not args:
+        logger.warning("ignoring %s: no argument", address)
+        return None
+    value = args[0]
+    # Require an actual int (OSC 'i' type). Don't coerce floats/strings — a float
+    # pitch like 60.9 must be ignored, not silently truncated to a valid pitch.
+    # bool is an int subclass, so exclude it explicitly.
+    if isinstance(value, bool) or not isinstance(value, int):
+        logger.warning("ignoring %s: non-integer argument %r", address, value)
+        return None
+    return value
+
 
 class RT2Engine:
     """Own the RT2 model + audio sink and stream generated chunks under the FSM.
 
-    Conditioning handlers (running on the OSC server's thread) mutate a shared
-    conditioning dict under a lock and mark it dirty. The async generate loop
-    applies the latest conditioning at each chunk boundary — latest-wins, so a
-    burst of control updates between chunks collapses to one re-embed. On a
-    generation failure the FSM enters ERROR and recovers for another attempt,
-    up to max_retries times, then settles in IDLE rather than looping forever.
+    Control handlers (running on the OSC server's thread) mutate shared
+    conditioning state under a lock. The async generate loop snapshots that
+    state at each chunk boundary — advancing note onsets to continuations — and
+    feeds it to the model. On a generation failure the FSM enters ERROR and
+    recovers for another attempt, up to max_retries times, then settles in IDLE
+    rather than looping forever.
     """
 
     def __init__(
@@ -56,12 +87,17 @@ class RT2Engine:
         self._sink = sink
         self._server = server
         self._lock = threading.Lock()
-        self._conditioning: dict = {
-            "prompt": default_prompt,
-            "intensity": default_intensity,
-        }
-        # Push the default conditioning before the first chunk.
-        self._dirty = True
+        # Style / intensity conditioning.
+        self._prompt = default_prompt
+        self._intensity = default_intensity
+        # Note conditioning (sparse): pitches currently held, and those struck
+        # since the last snapshot (onsets). Drums: -1 masked / 0 none / 1 play.
+        self._held: set[int] = set()
+        self._onsets: set[int] = set()
+        self._drum = -1
+        # Per-channel CFG overrides (None -> the model's own defaults).
+        self._cfg_notes: float | None = None
+        self._cfg_drums: float | None = None
         self._running = False
         self._max_chunks: int | None = None
         self._produced = 0
@@ -71,31 +107,24 @@ class RT2Engine:
         """Wire OSC addresses to handlers. One line per control channel."""
         self._server.map("/rt2/prompt", self._on_prompt)
         self._server.map("/rt2/intensity", self._on_intensity)
+        self._server.map("/rt2/note/on", self._on_note_on)
+        self._server.map("/rt2/note/off", self._on_note_off)
+        self._server.map("/rt2/drum", self._on_drum)
+        self._server.map("/rt2/cfg/notes", self._on_cfg_notes)
+        self._server.map("/rt2/cfg/drums", self._on_cfg_drums)
 
     def _on_prompt(self, address: str, *args) -> None:
-        """/rt2/prompt <string> — set the style prompt for the next chunk.
-
-        Malformed messages (no argument) are ignored, not fatal: the handler
-        runs on the OSC server thread, so raising here would kill that thread
-        and silently stop all further control updates.
-        """
+        """/rt2/prompt <string> — set the style prompt for the next chunk."""
         if not args:
             logger.warning("ignoring %s: no argument", address)
             return
         prompt = str(args[0])
         with self._lock:
-            self._conditioning["prompt"] = prompt
-            self._dirty = True
+            self._prompt = prompt
         logger.info("OSC prompt -> %r", prompt)
 
     def _on_intensity(self, address: str, *args) -> None:
-        """/rt2/intensity <float> — set the advisory intensity, clamped to 0..1.
-
-        Like _on_prompt, malformed messages (missing or non-numeric argument)
-        are ignored rather than crashing the OSC server thread. The value is
-        clamped to 0..1 so conditioning stays consistent with the HR mapping,
-        which always emits intensities in that range.
-        """
+        """/rt2/intensity <float> — set the advisory intensity, clamped to 0..1."""
         if not args:
             logger.warning("ignoring %s: no argument", address)
             return
@@ -104,18 +133,85 @@ class RT2Engine:
         except (TypeError, ValueError):
             logger.warning("ignoring %s: non-numeric argument %r", address, args[0])
             return
-        intensity = max(0.0, min(1.0, intensity))
         with self._lock:
-            self._conditioning["intensity"] = intensity
-            self._dirty = True
+            self._intensity = max(0.0, min(1.0, intensity))
 
-    def _take_conditioning(self) -> dict | None:
-        """Return the latest conditioning if it changed since last taken, else None."""
+    def _on_note_on(self, address: str, *args) -> None:
+        """/rt2/note/on <pitch> — press a pitch (onset this chunk, then held)."""
+        pitch = _coerce_int(address, args)
+        if pitch is None or not 0 <= pitch < NUM_PITCHES:
+            return
         with self._lock:
-            if not self._dirty:
-                return None
-            self._dirty = False
-            return dict(self._conditioning)
+            self._held.add(pitch)
+            self._onsets.add(pitch)
+
+    def _on_note_off(self, address: str, *args) -> None:
+        """/rt2/note/off <pitch> — release a pitch."""
+        pitch = _coerce_int(address, args)
+        if pitch is None or not 0 <= pitch < NUM_PITCHES:
+            return
+        with self._lock:
+            self._held.discard(pitch)
+
+    def _on_drum(self, address: str, *args) -> None:
+        """/rt2/drum <int> — set drum conditioning: -1 masked / 0 none / 1 play."""
+        value = _coerce_int(address, args)
+        if value is None:
+            return
+        with self._lock:
+            self._drum = max(-1, min(1, value))
+
+    def _on_cfg_notes(self, address: str, *args) -> None:
+        """/rt2/cfg/notes <float> — notes classifier-free-guidance scale (-1..7)."""
+        self._set_cfg(address, args, "notes")
+
+    def _on_cfg_drums(self, address: str, *args) -> None:
+        """/rt2/cfg/drums <float> — drums classifier-free-guidance scale (-1..7)."""
+        self._set_cfg(address, args, "drums")
+
+    def _set_cfg(self, address: str, args, channel: str) -> None:
+        if not args:
+            logger.warning("ignoring %s: no argument", address)
+            return
+        try:
+            scale = float(args[0])
+        except (TypeError, ValueError):
+            logger.warning("ignoring %s: non-numeric argument %r", address, args[0])
+            return
+        scale = max(CFG_MIN, min(CFG_MAX, scale))
+        with self._lock:
+            if channel == "notes":
+                self._cfg_notes = scale
+            else:
+                self._cfg_drums = scale
+
+    def _snapshot_conditioning(self) -> dict:
+        """Build the conditioning for the next chunk and advance note state.
+
+        Expands held pitches + onsets into RT2's 128-int notes vector (onset=2,
+        held=1, off=0), or None when nothing is held so the model roams. Clears
+        onsets afterwards, so a pitch still held next chunk becomes a
+        continuation. Called once per chunk from the generate loop.
+        """
+        with self._lock:
+            if self._held or self._onsets:
+                notes = [0] * NUM_PITCHES
+                for pitch in self._held:
+                    notes[pitch] = 1
+                for pitch in self._onsets:
+                    notes[pitch] = 2
+                self._onsets.clear()
+            else:
+                notes = None
+            drums = [self._drum] if self._drum != -1 else None
+            return {
+                "prompt": self._prompt,
+                "intensity": self._intensity,
+                "notes": notes,
+                "drums": drums,
+                "cfg_notes": self._cfg_notes,
+                "cfg_drums": self._cfg_drums,
+            }
 
     def stop(self) -> None:
         """Request the generate loop to stop after the current chunk."""
@@ -133,9 +229,7 @@ class RT2Engine:
         while self._running and not serve_task.done():
             if self._max_chunks is not None and self._produced >= self._max_chunks:
                 break
-            conditioning = self._take_conditioning()
-            if conditioning is not None:
-                self._mrt.update_conditioning(conditioning)
+            self._mrt.update_conditioning(self._snapshot_conditioning())
             state = next_state(state, Event.TICK)  # -> GENERATING
             # The model call blocks (MLX); keep the event loop responsive.
             chunk = await asyncio.to_thread(self._mrt.generate_chunk)
@@ -148,10 +242,11 @@ class RT2Engine:
         """Serve OSC and stream generated chunks under the FSM. Returns final state.
 
         Starts the sink, runs the blocking OSC server off-thread, then streams
-        chunks (applying the latest conditioning each boundary). On a generation
-        failure the FSM enters ERROR and retries the session up to max_retries
-        times, then surfaces the error and settles in IDLE. `max_chunks` bounds
-        the loop for tests. Always releases the sink and OSC server.
+        chunks (snapshotting the latest conditioning each boundary). On a
+        generation failure the FSM enters ERROR and retries the session up to
+        max_retries times, then surfaces the error and settles in IDLE.
+        `max_chunks` bounds the loop for tests. Always releases the sink and OSC
+        server.
         """
         self._sink.start()
         self._running = True

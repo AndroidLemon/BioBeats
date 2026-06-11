@@ -36,8 +36,15 @@ Pure core in `src/engine/fsm.py`; driven by RT2Engine. One state at a time.
 ## Adding a source
 Write a `src/integrations/<name>_bridge.py` adapter (owns one input Protocol + one
 OSCSenderProtocol) + a pure mapping module; forward onto `/rt2/*`. Nothing in the
-engine changes. New conditioning channels (`/rt2/notes`, …) are added in
-rt2_engine.py only once mrt2_client.py consumes them.
+engine changes.
+
+## /rt2/* control channels (engine handlers)
+prompt (s), intensity (f), note/on (i), note/off (i), drum (i), cfg/notes (f),
+cfg/drums (f). Notes are SPARSE: senders press/release pitches; the engine tracks
+held pitches and expands them to RT2's 128-int vector per chunk (onset 2 / held 1
+/ off 0 / masked None). Any new conditioning channel is one handler in
+rt2_engine.py + threading it through mrt2_client.py's generate() (strictly RT2,
+verified against installed source).
 
 ## Code Rules
 - Pure functions for all data transforms; side effects at module edges only

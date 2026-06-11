@@ -15,6 +15,12 @@ Architecture: `source → mapping → OSC (/rt2/*) → RT2 engine → audio`.
 - Sources (`src/ble/`, `src/midi/`) + mappings (`src/mapping/`, pure): the
   tunable creative core.
 
+`/rt2/*` channels: prompt, intensity, note/on, note/off, drum, cfg/notes,
+cfg/drums. Notes are SPARSE — senders press/release pitches; the engine tracks
+held pitches and expands them to RT2's 128-int vector per chunk (onset 2 / held 1
+/ off 0 / masked None). Style+intensity are latest-wins; the engine snapshots all
+conditioning each chunk.
+
 ## FSM States (engine lifecycle)
 IDLE → CONNECTING → STREAMING → GENERATING → ERROR → IDLE
 Pure core in `src/engine/fsm.py` (State/Event/next_state); driven by RT2Engine.

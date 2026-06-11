@@ -38,6 +38,7 @@ class _FakeRT2System:
 
     def generate(self, style=None, frames=25, state=None, **kwargs):
         self.generate_states.append(state)
+        self.last_generate_kwargs = kwargs  # notes/drums/cfg_* pass-through
         self._counter += 1
         new_state = f"state{self._counter}"
         # 48000 / 25 = 1920 samples per frame; float64 to test coercion.
@@ -91,3 +92,45 @@ def test_state_threaded_and_output_coerced(monkeypatch):
     assert first.shape == (96000, 2)
     assert first.dtype == np.float32
     assert second.shape == (96000, 2)
+
+
+def test_notes_drums_cfg_threaded_into_generate(monkeypatch):
+    _inject_fake_backend(monkeypatch)
+    from src.engine.mrt2_client import MRT2Client
+
+    client = MRT2Client()
+    notes = [0] * 128
+    notes[60] = 2
+    client.update_conditioning(
+        {
+            "prompt": "ambient",
+            "intensity": 0.5,
+            "notes": notes,
+            "drums": [1],
+            "cfg_notes": 4.0,
+            "cfg_drums": 2.0,
+        }
+    )
+    client.generate_chunk()
+
+    kwargs = client._mrt.last_generate_kwargs
+    assert kwargs["notes"] == notes
+    assert kwargs["drums"] == [1]
+    assert kwargs["cfg_notes"] == 4.0
+    assert kwargs["cfg_drums"] == 2.0
+
+
+def test_conditioning_without_note_keys_defaults_to_masked(monkeypatch):
+    _inject_fake_backend(monkeypatch)
+    from src.engine.mrt2_client import MRT2Client
+
+    client = MRT2Client()
+    # A style-only conditioning dict (no notes/drums/cfg) -> all masked (None).
+    client.update_conditioning({"prompt": "ambient", "intensity": 0.2})
+    client.generate_chunk()
+
+    kwargs = client._mrt.last_generate_kwargs
+    assert kwargs["notes"] is None
+    assert kwargs["drums"] is None
+    assert kwargs["cfg_notes"] is None
+    assert kwargs["cfg_drums"] is None

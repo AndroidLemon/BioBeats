@@ -105,14 +105,24 @@ The engine listens on UDP (default `127.0.0.1:5005`). Everything that drives RT2
 — our adapters and external tools alike — speaks this address space:
 
 ```
-/rt2/prompt     s   set the style prompt (re-embeds only on change)
+/rt2/prompt     s   style prompt (re-embeds only on change)
 /rt2/intensity  f   advisory 0..1 intensity carried in the conditioning
+/rt2/note/on    i   press a pitch 0-127 (an onset this chunk, then held)
+/rt2/note/off   i   release a pitch 0-127
+/rt2/drum       i   -1 masked / 0 no-drum / 1 play-drum
+/rt2/cfg/notes  f   how strictly RT2 follows your notes  (-1..7)
+/rt2/cfg/drums  f   how strictly RT2 follows the drums   (-1..7)
 ```
 
-Conditioning is applied latest-wins at each chunk boundary: a burst of messages
-between chunks collapses to a single re-embed. Adding a channel (e.g.
-`/rt2/notes`, `/rt2/drums`) is one handler + one `map()` call in `rt2_engine.py`
-once `MRT2Client` consumes that conditioning key.
+The engine snapshots the current conditioning at each chunk boundary. Style and
+intensity are latest-wins (a burst of messages collapses to one re-embed).
+
+**Notes are sparse:** you just press and release pitches — the engine tracks
+held pitches and, at each chunk, expands them into RT2's 128-int pitch-state
+vector (struck-since-last-chunk → *onset*, still-held → *continuation*, the rest
+→ *off*; nothing held → masked, so the model roams). Hold a chord and RT2
+generates an ensemble that follows your harmony. The `cfg/*` scales dial how
+tightly it obeys each channel — map them to an LFO or knob for live control.
 
 ## Adding a source
 

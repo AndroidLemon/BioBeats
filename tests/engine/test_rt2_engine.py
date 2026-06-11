@@ -1,6 +1,7 @@
-# Tests for the RT2 engine: handler dispatch, latest-wins conditioning, malformed
-# message handling, FSM-driven streaming, bounded error recovery, and server-death
-# termination (CI-safe — no network, no python-osc, no model, no audio device).
+# Tests for the RT2 engine: handler dispatch, the per-chunk conditioning
+# snapshot (style/intensity + sparse notes/drums/CFG), FSM-driven streaming,
+# bounded error recovery, and server-death termination (CI-safe — no network,
+# no python-osc, no model, no audio device).
 
 import asyncio
 
@@ -24,71 +25,140 @@ def test_stub_server_satisfies_protocol():
     assert isinstance(StubOSCServer(), OSCServerProtocol)
 
 
-def test_registers_handlers_on_construction():
+def test_registers_all_control_handlers():
     _, _, _, server = _make_engine()
-    assert "/rt2/prompt" in server.handlers
-    assert "/rt2/intensity" in server.handlers
+    assert set(server.handlers) == {
+        "/rt2/prompt",
+        "/rt2/intensity",
+        "/rt2/note/on",
+        "/rt2/note/off",
+        "/rt2/drum",
+        "/rt2/cfg/notes",
+        "/rt2/cfg/drums",
+    }
 
 
-def test_prompt_message_updates_conditioning():
+# --- style / intensity -----------------------------------------------------
+
+
+def test_prompt_message_updates_snapshot():
     engine, _, _, server = _make_engine()
     server.dispatch("/rt2/prompt", "techno bass")
-    assert engine._take_conditioning()["prompt"] == "techno bass"
+    assert engine._snapshot_conditioning()["prompt"] == "techno bass"
 
 
-def test_intensity_message_updates_conditioning():
+def test_intensity_message_is_clamped():
     engine, _, _, server = _make_engine()
-    server.dispatch("/rt2/intensity", 0.75)
-    assert engine._take_conditioning()["intensity"] == 0.75
+    server.dispatch("/rt2/intensity", 2.5)
+    assert engine._snapshot_conditioning()["intensity"] == 1.0
+    server.dispatch("/rt2/intensity", -0.5)
+    assert engine._snapshot_conditioning()["intensity"] == 0.0
 
 
-def test_take_conditioning_is_latest_wins():
+# --- sparse notes ----------------------------------------------------------
+
+
+def test_no_notes_held_is_masked():
+    engine, _, _, _ = _make_engine()
+    assert engine._snapshot_conditioning()["notes"] is None
+
+
+def test_note_on_is_onset_then_continuation():
     engine, _, _, server = _make_engine()
-    engine._take_conditioning()  # clear the initial default
-    server.dispatch("/rt2/prompt", "one")
-    server.dispatch("/rt2/prompt", "two")
-    server.dispatch("/rt2/prompt", "three")
-    taken = engine._take_conditioning()
-    assert taken["prompt"] == "three"
-    # Nothing new since: a second take yields None (no redundant re-embed).
-    assert engine._take_conditioning() is None
+    server.dispatch("/rt2/note/on", 60)
+
+    first = engine._snapshot_conditioning()["notes"]
+    assert first[60] == 2  # struck this chunk -> onset
+    assert sum(first) == 2  # only pitch 60 is active
+
+    second = engine._snapshot_conditioning()["notes"]
+    assert second[60] == 1  # still held -> continuation
+
+    server.dispatch("/rt2/note/off", 60)
+    assert engine._snapshot_conditioning()["notes"] is None  # nothing held -> masked
 
 
-async def test_run_streams_chunks_and_applies_osc_prompt():
-    engine, mrt, sink, server = _make_engine()
-    server.dispatch("/rt2/prompt", "ambient drone")
-    final = await engine.run(max_chunks=2)
-    # Clean end after streaming settles back in STREAMING.
-    assert final == State.STREAMING
-    assert sink.started and sink.stopped
-    assert sink.chunks_written == 2
-    # The OSC-sent prompt reached the model.
-    assert mrt.conditioning["prompt"] == "ambient drone"
+def test_chord_marks_all_onsets():
+    engine, _, _, server = _make_engine()
+    for pitch in (60, 64, 67):
+        server.dispatch("/rt2/note/on", pitch)
+    notes = engine._snapshot_conditioning()["notes"]
+    assert notes[60] == notes[64] == notes[67] == 2
 
 
-async def test_run_pushes_default_conditioning_without_osc():
-    engine, mrt, sink, _ = _make_engine(default_prompt="seed pad")
-    await engine.run(max_chunks=1)
-    assert mrt.conditioning["prompt"] == "seed pad"
+def test_tap_within_one_chunk_still_registers_onset():
+    # Pressed and released before the snapshot: the onset for that chunk stands.
+    engine, _, _, server = _make_engine()
+    server.dispatch("/rt2/note/on", 72)
+    server.dispatch("/rt2/note/off", 72)
+    first = engine._snapshot_conditioning()["notes"]
+    assert first[72] == 2
+    # ...but it isn't held, so the next chunk is masked again.
+    assert engine._snapshot_conditioning()["notes"] is None
+
+
+def test_out_of_range_pitches_are_ignored():
+    engine, _, _, server = _make_engine()
+    server.dispatch("/rt2/note/on", 200)
+    server.dispatch("/rt2/note/on", -1)
+    assert engine._snapshot_conditioning()["notes"] is None
+
+
+# --- drums / cfg -----------------------------------------------------------
+
+
+def test_drum_state_threads_into_snapshot():
+    engine, _, _, server = _make_engine()
+    assert engine._snapshot_conditioning()["drums"] is None  # -1 masked by default
+    server.dispatch("/rt2/drum", 1)
+    assert engine._snapshot_conditioning()["drums"] == [1]
+    server.dispatch("/rt2/drum", 0)
+    assert engine._snapshot_conditioning()["drums"] == [0]
+
+
+def test_cfg_scales_are_set_and_clamped():
+    engine, _, _, server = _make_engine()
+    server.dispatch("/rt2/cfg/notes", 4.0)
+    server.dispatch("/rt2/cfg/drums", 99.0)  # clamps to 7.0
+    snap = engine._snapshot_conditioning()
+    assert snap["cfg_notes"] == 4.0
+    assert snap["cfg_drums"] == 7.0
 
 
 def test_malformed_messages_do_not_raise():
-    # Empty/bad OSC args must not crash the server thread; they are ignored,
-    # leaving conditioning unchanged (only the initial default stays dirty).
     engine, _, _, server = _make_engine()
-    engine._take_conditioning()  # clear the initial default
-    server.dispatch("/rt2/prompt")  # no argument
-    server.dispatch("/rt2/intensity")  # no argument
+    server.dispatch("/rt2/prompt")  # no arg
     server.dispatch("/rt2/intensity", "loud")  # non-numeric
-    assert engine._take_conditioning() is None
+    server.dispatch("/rt2/note/on")  # no arg
+    server.dispatch("/rt2/note/on", "x")  # non-integer
+    server.dispatch("/rt2/note/on", 60.5)  # float pitch -> ignored, not truncated
+    server.dispatch("/rt2/drum", 1.9)  # float -> ignored, not truncated to 1
+    server.dispatch("/rt2/cfg/notes", "x")  # non-numeric
+    snap = engine._snapshot_conditioning()
+    assert snap["notes"] is None and snap["cfg_notes"] is None
+    assert snap["drums"] is None
 
 
-def test_intensity_is_clamped_to_unit_range():
-    engine, _, _, server = _make_engine()
-    server.dispatch("/rt2/intensity", 2.5)
-    assert engine._take_conditioning()["intensity"] == 1.0
-    server.dispatch("/rt2/intensity", -0.5)
-    assert engine._take_conditioning()["intensity"] == 0.0
+# --- run loop --------------------------------------------------------------
+
+
+async def test_run_streams_chunks_and_applies_conditioning():
+    engine, mrt, sink, server = _make_engine()
+    server.dispatch("/rt2/prompt", "ambient drone")
+    server.dispatch("/rt2/note/on", 60)
+    final = await engine.run(max_chunks=2)
+    assert final == State.STREAMING
+    assert sink.started and sink.stopped
+    assert sink.chunks_written == 2
+    # The latest snapshot reached the model: prompt + the held note.
+    assert mrt.conditioning["prompt"] == "ambient drone"
+    assert mrt.conditioning["notes"][60] in (1, 2)
+
+
+async def test_run_pushes_default_prompt_without_osc():
+    engine, mrt, _, _ = _make_engine(default_prompt="seed pad")
+    await engine.run(max_chunks=1)
+    assert mrt.conditioning["prompt"] == "seed pad"
 
 
 class _FailingMRT2Client:
@@ -109,11 +179,8 @@ async def test_generation_failure_retries_then_settles_idle(caplog):
     mrt = _FailingMRT2Client()
     sink = NullAudioSink()
     final = await RT2Engine(mrt, sink, StubOSCServer()).run(max_retries=3)
-    # Settles in IDLE after exhausting retries.
     assert final == State.IDLE
-    # 1 initial attempt + 3 retries = 4 generate_chunk calls.
-    assert mrt.calls == 4
-    # Sink released, error surfaced (not silently swallowed).
+    assert mrt.calls == 4  # 1 initial + 3 retries
     assert sink.stopped is True
     assert "engine failed after 3 retries" in caplog.text
 
@@ -126,10 +193,8 @@ class _DyingOSCServer(StubOSCServer):
 
 
 async def test_run_stops_and_surfaces_server_thread_failure(caplog):
-    mrt = StubMRT2Client()
     sink = NullAudioSink()
-    engine = RT2Engine(mrt, sink, _DyingOSCServer())
-    # No max_chunks: the loop must terminate on its own when the server dies.
+    engine = RT2Engine(StubMRT2Client(), sink, _DyingOSCServer())
     await asyncio.wait_for(engine.run(), timeout=5)
     assert sink.stopped is True
     assert "OSC server thread failed" in caplog.text
