@@ -42,7 +42,13 @@ class RecordingAudioSink:
         wav.setsampwidth(2)  # 16-bit PCM
         wav.setframerate(self._sample_rate)
         self._wav = wav
-        self._inner.start()
+        try:
+            self._inner.start()
+        except Exception:
+            # Don't leave a dangling/partial WAV if the device fails to open.
+            self._wav = None
+            wav.close()
+            raise
 
     def write(self, samples: np.ndarray) -> None:
         """Append the chunk to the WAV, then forward it to the inner sink."""
@@ -51,11 +57,14 @@ class RecordingAudioSink:
         self._inner.write(samples)
 
     def stop(self) -> None:
-        """Stop the inner sink and close the WAV. Idempotent on the WAV."""
-        self._inner.stop()
-        if self._wav is not None:
-            self._wav.close()
-            self._wav = None
+        """Stop the inner sink and close the WAV. The WAV is always finalized."""
+        try:
+            self._inner.stop()
+        finally:
+            # Close in finally so the WAV header is flushed even if stop() raises.
+            if self._wav is not None:
+                self._wav.close()
+                self._wav = None
 
     @staticmethod
     def _to_pcm16(samples: np.ndarray) -> bytes:
