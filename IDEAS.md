@@ -19,49 +19,70 @@ real project. Each item leads with the case for doing it.
 
 ---
 
-## Near-term sequence (agreed)
+## v1 — the definition of done
 
-The intended opening order — de-risk first, then keepability, then the big
-musical unlock:
+The agreed near-term sequence has shipped: doctor/preflight (#7), session
+recording & replay (#8), notes/drums/CFG conditioning (#9), MIDI plays RT2
+harmony (#10), plus the engine robustness items (IDLE-on-server-death,
+latency/underrun instrumentation). **There is no more code between here and
+playing.** v1 is *done* when these four things have happened on the real Mac
+rig — each is a checkbox, not a feature:
 
-1. **Real-hardware shakeout** (S–M) — prove the real path works end to end.
-2. **Session recording** (S–M) — cheap, makes every later experiment keepable.
-3. **`/rt2/notes` + `/rt2/drums` conditioning** (L) — the biggest musical unlock.
-4. **Dubler 2 / MIDI expressivity** (S–M) — rides in right behind the notes channel.
+- [ ] **Preflight passes:** `python run_doctor.py --play-tone --load-model`
+  exits clean (no FAILs).
+- [ ] **A real biometric session:** OTBeat paired, ≥ 10 minutes of HR-driven
+  music without a crash; the end-of-run latency summary shows mean generation
+  under the 2 s budget and the sink reports no underruns.
+- [ ] **A real MIDI session:** hold chords (Dubler 2 or a keyboard) and hear
+  RT2 follow the harmony.
+- [ ] **One keeper take:** a session recorded with `--record` +
+  `--record-audio`, and its control log replayed via `replay.py`.
+
+When all four are checked, **stop building and play**. Everything below is the
+*post-play backlog*: nothing in it gets picked up until a few real sessions
+have happened, and play sessions — not this list — set the next priorities.
+(Expect playing to reorder it: e.g. style crossfade only matters if zone
+hard-cuts actually grate; source merging only matters once HR + MIDI together
+is something you reach for.)
 
 ---
 
-## Engine depth — use more of what RT2 actually does
+## Shipped
 
-We currently drive only `style` (prompt) + advisory `intensity`. RT2's headline
-tricks are still unused.
+- [x] **Real-hardware shakeout tooling** — `run_doctor.py` per-layer preflight
+  (#7). The shakeout itself is the v1 checklist above.
+- [x] **Session recording** — control-log + WAV decorators, `replay.py` (#8).
+- [x] **`/rt2/notes` + `/rt2/drums` channels** — sparse OSC note control,
+  pitch-state expansion in the engine, `cfg/notes` + `cfg/drums` scales (#9).
+- [x] **Dubler 2 / MIDI expressivity** — MIDI plays RT2 harmony: notes →
+  `/rt2/note/*`, GM ch.10 → drums (#10).
+- [x] **`IDLE`-on-server-death cleanup** — a dead control surface now settles
+  the FSM to `IDLE` instead of impersonating a clean stop.
+- [x] **Latency / underrun instrumentation** — per-chunk generation time vs.
+  the real-time budget (warn + session summary), underrun counting and buffer
+  health in the audio sink. The numbers that say whether `mrt2_base` is viable
+  live.
 
-- [ ] **`/rt2/notes` + `/rt2/drums` channels** · **L** — *The* RT2 superpower:
-  hold a chord and the model generates an ensemble that follows your harmony.
-  Today MIDI just picks a low/mid/high zone; with real note conditioning, MIDI
-  (and Dubler 2) becomes actual playing — pitch, harmony, rhythm. Biggest musical
-  payoff in the list, and the one capability RT2 is uniquely good at that we're
-  leaving on the table. Touches `mrt2_client.py` (verify the RT2 notes/drums API
-  on-device first — strictly RT2, verify don't guess), plus engine handlers + a
-  mapping module.
+---
 
-- [ ] **Live CFG / temperature / top_k controls** (`/rt2/cfg/*`,
-  `/rt2/temperature`) · **S–M** — Expose RT2's "how strictly do you obey each
-  channel" knobs as live OSC params. Turns the rig from a toggle into a
-  performance instrument: dial "follow my notes tightly" vs. "roam freely," and
-  map it to an LFO or knob. Pairs naturally with the notes channel.
+## Post-play backlog
+
+### Engine depth — use more of what RT2 actually does
+
+Style, intensity, notes, drums, and per-channel CFG are live. What's left of
+RT2's headline tricks:
+
+- [ ] **Live temperature / top_k controls** (`/rt2/temperature`, `/rt2/top_k`)
+  · **S** — `cfg/notes` + `cfg/drums` shipped with the notes channel; the
+  sampling knobs are the remainder. Worth doing only if play sessions want a
+  "roam more / roam less" control beyond CFG.
 
 - [ ] **Style crossfade / prompt morphing** · **M** — Interpolate between style
   embeddings over a few chunks instead of snapping on prompt change. Directly
   fixes the flagship biometric feel: HR drifting across a zone boundary should
   glide, not hard-cut. Self-contained in `mrt2_client.py`.
 
-## New sources — prove and exploit the extensibility
-
-- [ ] **Dubler 2 / MIDI expressivity** · **S** (M with notes channel) — The MIDI
-  adapter already exists and the hardware is on hand, so this is the
-  closest-to-free win. Voice → MIDI → harmony is a killer, demoable thread and
-  the concrete payoff of the engine/adapter refactor.
+### New sources — prove and exploit the extensibility
 
 - [ ] **Audio-style "cloning" source** · **M–L** — RT2's MusicCoCa embeds *audio*
   as a style target too ("make it sound like this snippet"). A source that grabs
@@ -74,7 +95,7 @@ tricks are still unused.
   external OSC tool just works" claim that motivated the refactor — and it's the
   original thread that kicked this off. Mostly SC-side, little Python.
 
-## Composition — where it becomes a *system*
+### Composition — where it becomes a *system*
 
 - [ ] **Source merging / layering** · **M** — Run HR + MIDI simultaneously: HR
   owns intensity/style, MIDI owns notes. The bus already allows it; what's
@@ -87,41 +108,20 @@ tricks are still unused.
   flexibility; the creative-core mappings become tunable without edits. Do this
   *after* merging, once the channel model is settled.
 
-## Outputs — make sessions keepable
-
-- [ ] **Session recording** · **S–M** — Tee the audio sink to a WAV and log the
-  timestamped `/rt2/*` control stream. You'll want to keep good takes, and a
-  replayable control log gives deterministic real-session debugging + regression
-  material for free. High value-to-cost; do it early.
+### Outputs
 
 - [ ] **Hydra visuals, for real** · **M** — Fanout already exists; build the
   actual `hydra-osc` patch mapping `/rt2/*` → visual params. Completes the AV
   instrument and makes installations/demos sing. Mostly Hydra-side.
 
-## Robustness & groundwork — de-risk the fun
-
-- [ ] **Real-hardware shakeout** · **S–M** — A guided script/checklist that
-  exercises Mac + OTBeat BLE pairing + RT2 model download + audio device, with
-  diagnostics. Every idea above assumes the real path works, and it hasn't been
-  run on hardware yet. The sooner the integration gremlins surface, the cheaper
-  they are. Ranked #1.
-
-- [ ] **Latency / underrun instrumentation** · **S** — Measure generation time
-  against the 2-second chunk budget and watch buffer health. Real-time audio
-  lives or dies here; you'll want numbers before tuning model size/quantization,
-  and it tells you whether `mrt2_base` is even viable live on a given machine.
+### Robustness & groundwork
 
 - [ ] **Live status TUI** · **M** — Show state, HR/zone, active prompt,
   intensity, chunk timing. Performing blind is miserable; a dashboard makes it
-  playable and debuggable.
+  playable and debuggable. The engine already exposes the numbers it would
+  show (`engine.latency`, `sink.buffered_frames()`, `sink.underruns`).
 
-- [ ] **`IDLE`-on-server-death cleanup** · **S** — Copilot's parked PR #5
-  suggestion: `RT2Engine._stream_session` returns `STREAMING` when the OSC server
-  thread dies, so the terminal `State` looks like a clean stop even though the
-  transport failed. Settle to `IDLE` so callers can tell a clean stop / max_chunks
-  from a dead control surface. Cheap contract-honesty fix; good warm-up task.
-
-## Strategic / longer-horizon
+### Strategic / longer-horizon
 
 - [ ] **Model-agnostic engine** · **M to scope, L to build** — Down the line we
   may want to try other music models, so it's worth keeping the door open *now*,

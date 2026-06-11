@@ -102,6 +102,24 @@ python run_doctor.py --only osc-port,audio   # or --skip ble
 It exits non-zero only if a check **FAIL**s (WARN/SKIP don't), so it also works
 as a setup gate.
 
+### Is it keeping up? (latency & underruns)
+
+Real-time audio lives or dies on one comparison: can the model generate a chunk
+faster than the chunk plays? The engine times every `generate_chunk()` against
+that chunk's playback duration (2 s), warns when one blows its budget, and logs
+a session summary at shutdown:
+
+```
+latency: 312 chunks, mean 1.41s / 2.00s budget (71%), worst 1.88s, 0 over budget
+audio: no underruns
+```
+
+The audio sink counts underruns (playback running dry — once per dry spell,
+ignoring the priming gap before the first chunk and the teardown drain). Mean
+under budget + zero underruns means the chosen `--size` is viable live on that
+machine; over-budget chunks or underruns mean drop to `mrt2_small` or close
+some apps.
+
 ## The control contract: `/rt2/*`
 
 The engine listens on UDP (default `127.0.0.1:5005`). Everything that drives RT2
