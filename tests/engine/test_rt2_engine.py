@@ -195,6 +195,28 @@ class _DyingOSCServer(StubOSCServer):
 async def test_run_stops_and_surfaces_server_thread_failure(caplog):
     sink = NullAudioSink()
     engine = RT2Engine(StubMRT2Client(), sink, _DyingOSCServer())
-    await asyncio.wait_for(engine.run(), timeout=5)
+    final = await asyncio.wait_for(engine.run(), timeout=5)
+    # A dead control surface is not a clean stop: settle to IDLE, not STREAMING.
+    assert final == State.IDLE
     assert sink.stopped is True
     assert "OSC server thread failed" in caplog.text
+
+
+class _QuittingOSCServer(StubOSCServer):
+    """OSC server whose serve() returns early without raising — thread just exits."""
+
+    def serve(self) -> None:
+        return
+
+
+async def test_server_thread_exit_settles_idle():
+    engine = RT2Engine(StubMRT2Client(), NullAudioSink(), _QuittingOSCServer())
+    final = await asyncio.wait_for(engine.run(), timeout=5)
+    assert final == State.IDLE
+
+
+async def test_max_chunks_is_still_a_clean_stop():
+    # Reaching the requested chunk bound is a clean stop -> terminal STREAMING.
+    engine, _, _, _ = _make_engine()
+    final = await asyncio.wait_for(engine.run(max_chunks=1), timeout=5)
+    assert final == State.STREAMING

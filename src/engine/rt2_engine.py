@@ -217,17 +217,23 @@ class RT2Engine:
         """Request the generate loop to stop after the current chunk."""
         self._running = False
 
+    def _reached_max_chunks(self) -> bool:
+        return self._max_chunks is not None and self._produced >= self._max_chunks
+
     async def _stream_session(self, serve_task: asyncio.Task) -> State:
         """Run one streaming session, returning its terminal state.
 
         CONNECTING -> STREAMING, then a chunk per tick until stop(), the OSC
-        server thread exits, or max_chunks is reached. Raises if generation
-        fails — run() catches that to drive the ERROR/recovery cycle.
+        server thread exits, or max_chunks is reached. A clean stop (stop() or
+        max_chunks) ends in STREAMING; a dead OSC server thread is a transport
+        failure, so it settles to IDLE instead — callers can tell the two
+        apart. Raises if generation fails — run() catches that to drive the
+        ERROR/recovery cycle.
         """
         state = next_state(State.IDLE, Event.CONNECT)  # -> CONNECTING
         state = next_state(state, Event.READY)  # -> STREAMING
         while self._running and not serve_task.done():
-            if self._max_chunks is not None and self._produced >= self._max_chunks:
+            if self._reached_max_chunks():
                 break
             self._mrt.update_conditioning(self._snapshot_conditioning())
             state = next_state(state, Event.TICK)  # -> GENERATING
@@ -236,6 +242,12 @@ class RT2Engine:
             self._sink.write(chunk)
             self._produced += 1
             state = next_state(state, Event.CHUNK)  # -> STREAMING
+        if self._running and serve_task.done() and not self._reached_max_chunks():
+            # The control surface died mid-session, not a stop() or chunk
+            # bound: don't let the terminal state impersonate a clean stop.
+            logger.warning("OSC server thread exited mid-session; settling to IDLE")
+            state = next_state(state, Event.ERROR)  # -> ERROR
+            state = next_state(state, Event.RECOVER)  # -> IDLE
         return state
 
     async def run(self, max_chunks: int | None = None, max_retries: int = 3) -> State:
