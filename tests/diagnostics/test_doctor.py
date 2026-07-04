@@ -255,3 +255,14 @@ def test_osc_port_fail_hint_mentions_running_engine():
         assert "engine" in result.hint  # might just be the engine, mid-session
     finally:
         sock.close()
+
+
+def test_rt2_graph_without_state_file_is_not_weights_present(monkeypatch, tmp_path):
+    # A partial download (graph exported, state weights missing) must WARN,
+    # not PASS — the model can't load without both artifacts.
+    _fake_magenta_paths(monkeypatch, tmp_path)
+    model_dir = tmp_path / "mrt2_small"
+    model_dir.mkdir()
+    (model_dir / "graph.mlxfn").touch()
+    result = check_rt2_model(DoctorConfig(model_size="mrt2_small"))
+    assert result.status is CheckStatus.WARN

@@ -297,9 +297,14 @@ def check_rt2_model(config: DoctorConfig) -> CheckResult:
         )
 
     model_dir = paths.models_dir() / config.model_size
-    # An existing-but-empty directory (aborted download) is not "present":
-    # require the exported graph + state files `mrt models download` produces.
-    weights_present = model_dir.is_dir() and any(model_dir.glob("*.mlxfn"))
+    # An existing-but-empty or partial directory (aborted download) is not
+    # "present": require BOTH artifacts `mrt models download` produces — the
+    # exported graph (.mlxfn) and its weights (_state.safetensors).
+    weights_present = (
+        model_dir.is_dir()
+        and any(model_dir.glob("*.mlxfn"))
+        and any(model_dir.glob("*.safetensors"))
+    )
 
     if not config.load_model:
         if weights_present:
