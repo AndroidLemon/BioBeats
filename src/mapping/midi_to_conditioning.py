@@ -11,8 +11,10 @@
 #                                  -> /rt2/intensity <0..1>   (from velocity)
 #   note_off / note_on velocity 0  -> /rt2/note/off <pitch>   (release it)
 #   note on/off on the drum channel (GM channel 10) -> /rt2/drum 1 / 0
-#   control_change (any CC)        -> /rt2/intensity <0..1>   (from CC value)
-#   anything else (pitchwheel, ...) -> ignored
+#   control_change (CC1 mod wheel, CC11 expression)
+#                                  -> /rt2/intensity <0..1>   (from CC value)
+#   anything else (other CCs, pitchwheel, ...) -> ignored — a sustain pedal
+#     or bank-select must not slam intensity around
 #
 # Style/prompt is intentionally NOT driven by MIDI here — it comes from other
 # sources (HR, an external OSC tool) or the engine default, so notes stay pure
@@ -21,6 +23,9 @@
 
 # General MIDI puts percussion on channel 10, which mido exposes 0-indexed as 9.
 DRUM_CHANNEL = 9
+
+# CCs that deliberately express energy; everything else is ignored.
+INTENSITY_CCS = frozenset({1, 11})  # mod wheel, expression
 
 
 def velocity_to_intensity(velocity: int) -> float:
@@ -60,6 +65,6 @@ def midi_message_to_osc(msg) -> list[tuple[str, object]]:
         if channel == DRUM_CHANNEL:
             return [("/rt2/drum", 0)]
         return [("/rt2/note/off", msg.note)]
-    if msg.type == "control_change":
+    if msg.type == "control_change" and msg.control in INTENSITY_CCS:
         return [("/rt2/intensity", cc_to_intensity(msg.value))]
     return []
