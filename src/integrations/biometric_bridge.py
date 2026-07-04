@@ -1,7 +1,7 @@
 # Biometric -> OSC bridge: forwards heart rate as RT2 control messages.
 #
-# The project's original soul (HR -> generative music), refactored into the same
-# shape as every other control surface: a BLE heart-rate monitor is now "just
+# The project's original use case (HR -> generative music), refactored into the
+# same shape as every other control surface: a BLE heart-rate monitor is "just
 # another OSC client" feeding the same /rt2/prompt and /rt2/intensity addresses
 # RT2Engine listens on (loopback UDP). It owns one HRMonitorProtocol + one
 # OSCSenderProtocol and depends on neither the engine internals nor a concrete

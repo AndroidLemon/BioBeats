@@ -152,7 +152,7 @@ wheels = [
 ]
 
 [[package]]
-name = "biometric-music-pipeline"
+name = "biobeats"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
