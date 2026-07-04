@@ -60,7 +60,10 @@ async def test_engine_driven_over_real_udp_while_streaming():
             cond = mrt.conditioning or {}
             return cond.get("prompt") == "wire test" and cond.get("notes")
 
+        deadline = time.monotonic() + 10
         while not _landed():
+            if time.monotonic() > deadline:  # pragma: no cover - fail, not hang
+                pytest.fail("conditioning never landed over UDP")
             client.send("/rt2/prompt", "wire test")
             client.send("/rt2/note/on", 61)
             await asyncio.sleep(0.02)
@@ -81,3 +84,25 @@ async def test_engine_driven_over_real_udp_while_streaming():
             engine.stop()
             server.shutdown()
             await asyncio.wait_for(run_task, timeout=5)
+
+
+class _FailingConditioningClient(StubMRT2Client):
+    """Client whose conditioning update raises synchronously (e.g. a runtime
+    embed failure) — before the loop ever awaits anything."""
+
+    def update_conditioning(self, conditioning):
+        raise RuntimeError("embed failed")
+
+
+async def test_sync_conditioning_failure_settles_idle_with_a_real_server():
+    # Regression: with every retry raising synchronously, run() used to reach
+    # its finally without the serve thread ever starting, and the REAL
+    # socketserver shutdown() then blocked the event loop forever. (If this
+    # regresses, the test hangs rather than fails — the suite timeout is the
+    # backstop.)
+    server = OSCServer(host="127.0.0.1", port=0)
+    sink = NullAudioSink()
+    engine = RT2Engine(_FailingConditioningClient(), sink, server)
+    final = await asyncio.wait_for(engine.run(max_retries=2), timeout=5)
+    assert final == State.IDLE
+    assert sink.stopped is True

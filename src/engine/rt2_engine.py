@@ -397,6 +397,11 @@ class RT2Engine:
         self._max_chunks = max_chunks
         self._produced = 0
         serve_task = asyncio.create_task(asyncio.to_thread(self._server.serve))
+        # Let the serve task actually start before anything can raise
+        # synchronously: if serve() never runs, socketserver's shutdown() in
+        # the finally below blocks forever (its shutdown event is only set by
+        # a serve loop exiting), freezing the event loop on exit.
+        await asyncio.sleep(0)
         state = State.IDLE
         attempt = 0
         try:
