@@ -27,6 +27,7 @@ class Event(str, enum.Enum):
     READY = "ready"
     TICK = "tick"  # cadence boundary: time to generate the next chunk
     CHUNK = "chunk"
+    STOP = "stop"  # clean shutdown requested (stop(), max_chunks reached)
     ERROR = "error"
     RECOVER = "recover"
 
@@ -37,6 +38,7 @@ _TRANSITIONS: dict[tuple[State, Event], State] = {
     (State.CONNECTING, Event.READY): State.STREAMING,
     (State.STREAMING, Event.TICK): State.GENERATING,
     (State.GENERATING, Event.CHUNK): State.STREAMING,
+    (State.STREAMING, Event.STOP): State.IDLE,
     (State.ERROR, Event.RECOVER): State.IDLE,
 }
 

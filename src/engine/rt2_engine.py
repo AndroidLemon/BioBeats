@@ -218,15 +218,18 @@ class RT2Engine:
         self._running = False
 
     async def _stream_session(self, serve_task: asyncio.Task) -> State:
-        """Run one streaming session, returning its terminal state.
+        """Run one streaming session, settling to IDLE on a clean stop.
 
-        CONNECTING -> STREAMING, then a chunk per tick until stop(), the OSC
-        server thread exits, or max_chunks is reached. Raises if generation
-        fails — run() catches that to drive the ERROR/recovery cycle.
+        CONNECTING -> STREAMING, then a chunk per tick until stop() or
+        max_chunks, then STOP -> IDLE. A dead OSC server thread is a failure,
+        not a stop: it raises (as does a generation error), and run() catches
+        that to drive the ERROR/recovery cycle.
         """
         state = next_state(State.IDLE, Event.CONNECT)  # -> CONNECTING
         state = next_state(state, Event.READY)  # -> STREAMING
-        while self._running and not serve_task.done():
+        while self._running:
+            if serve_task.done():
+                raise RuntimeError("OSC control surface died mid-session")
             if self._max_chunks is not None and self._produced >= self._max_chunks:
                 break
             self._mrt.update_conditioning(self._snapshot_conditioning())
@@ -236,17 +239,18 @@ class RT2Engine:
             self._sink.write(chunk)
             self._produced += 1
             state = next_state(state, Event.CHUNK)  # -> STREAMING
-        return state
+        return next_state(state, Event.STOP)  # -> IDLE
 
     async def run(self, max_chunks: int | None = None, max_retries: int = 3) -> State:
         """Serve OSC and stream generated chunks under the FSM. Returns final state.
 
         Starts the sink, runs the blocking OSC server off-thread, then streams
-        chunks (snapshotting the latest conditioning each boundary). On a
-        generation failure the FSM enters ERROR and retries the session up to
-        max_retries times, then surfaces the error and settles in IDLE.
-        `max_chunks` bounds the loop for tests. Always releases the sink and OSC
-        server.
+        chunks (snapshotting the latest conditioning each boundary). A clean
+        stop (stop() or max_chunks) settles to IDLE. On a generation failure
+        the FSM enters ERROR and retries the session up to max_retries times
+        (a dead OSC server skips the retries — they'd be futile), then
+        surfaces the error and settles in IDLE. `max_chunks` bounds the loop
+        for tests. Always releases the sink and OSC server.
         """
         self._sink.start()
         self._running = True
@@ -261,6 +265,10 @@ class RT2Engine:
                     return await self._stream_session(serve_task)
                 except Exception as exc:  # noqa: BLE001 - boundary: any failure -> ERROR
                     state = next_state(state, Event.ERROR)  # -> ERROR
+                    if serve_task.done():
+                        # No control surface, so retrying is futile — settle.
+                        logger.error("engine control surface died: %r", exc)
+                        return next_state(state, Event.RECOVER)  # -> IDLE
                     if attempt >= max_retries:
                         logger.error(
                             "engine failed after %d retries: %r", max_retries, exc

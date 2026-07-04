@@ -142,17 +142,33 @@ def test_malformed_messages_do_not_raise():
 # --- run loop --------------------------------------------------------------
 
 
-async def test_run_streams_chunks_and_applies_conditioning():
+async def test_run_streams_chunks_and_settles_idle():
     engine, mrt, sink, server = _make_engine()
     server.dispatch("/rt2/prompt", "ambient drone")
     server.dispatch("/rt2/note/on", 60)
     final = await engine.run(max_chunks=2)
-    assert final == State.STREAMING
+    assert final == State.IDLE  # a clean stop settles the FSM
     assert sink.started and sink.stopped
     assert sink.chunks_written == 2
     # The latest snapshot reached the model: prompt + the held note.
     assert mrt.conditioning["prompt"] == "ambient drone"
     assert mrt.conditioning["notes"][60] in (1, 2)
+
+
+async def test_stop_terminates_unbounded_run():
+    engine, _, sink, _ = _make_engine()
+
+    original_write = sink.write
+
+    def write_and_stop(samples):
+        original_write(samples)
+        engine.stop()  # a control surface (or signal handler) pulls the plug
+
+    sink.write = write_and_stop
+    final = await asyncio.wait_for(engine.run(), timeout=5)
+    assert final == State.IDLE
+    assert sink.chunks_written == 1
+    assert sink.stopped is True
 
 
 async def test_run_pushes_default_prompt_without_osc():
@@ -192,9 +208,14 @@ class _DyingOSCServer(StubOSCServer):
         raise RuntimeError("bind failed")
 
 
-async def test_run_stops_and_surfaces_server_thread_failure(caplog):
+async def test_server_death_is_an_error_not_a_clean_stop(caplog):
+    mrt = StubMRT2Client()
     sink = NullAudioSink()
-    engine = RT2Engine(StubMRT2Client(), sink, _DyingOSCServer())
-    await asyncio.wait_for(engine.run(), timeout=5)
+    engine = RT2Engine(mrt, sink, _DyingOSCServer())
+    final = await asyncio.wait_for(engine.run(), timeout=5)
+    # A dead control surface is a failure: the FSM goes through ERROR and
+    # settles in IDLE, and the failure is logged — never a silent STREAMING.
+    assert final == State.IDLE
     assert sink.stopped is True
+    assert "control surface died" in caplog.text
     assert "OSC server thread failed" in caplog.text
