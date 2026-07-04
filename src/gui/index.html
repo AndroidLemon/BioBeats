@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BioBeats Command Center</title>
+<style>
+  body { font-family: ui-monospace, monospace; background: #14161a; color: #e6e6e6;
+         max-width: 640px; margin: 2rem auto; padding: 0 1rem; }
+  h1 { font-size: 1.1rem; }
+  input, button { font: inherit; padding: .4rem .6rem; background: #1f232a;
+                  color: inherit; border: 1px solid #3a3f47; border-radius: 4px; }
+  button { cursor: pointer; }
+  pre { background: #1f232a; padding: .8rem; border-radius: 4px; overflow-x: auto; }
+</style>
+</head>
+<body>
+<h1>BioBeats Command Center</h1>
+<p>
+  <input id="prompt" placeholder="style prompt" size="40">
+  <button id="send">Send</button>
+  <button id="panic">Panic</button>
+</p>
+<pre id="status">no engine status yet</pre>
+<script>
+async function send(address, value) {
+  await fetch('/api/send', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({address, value}),
+  });
+}
+document.getElementById('send').onclick = () =>
+  send('/rt2/prompt', document.getElementById('prompt').value);
+document.getElementById('panic').onclick = () => send('/rt2/notes/clear', 1);
+setInterval(async () => {
+  const response = await fetch('/api/status');
+  const payload = await response.json();
+  document.getElementById('status').textContent =
+    JSON.stringify(payload, null, 2);
+}, 500);
+</script>
+</body>
+</html>
