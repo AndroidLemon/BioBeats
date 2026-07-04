@@ -5,40 +5,322 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>BioBeats Command Center</title>
 <style>
-  body { font-family: ui-monospace, monospace; background: #14161a; color: #e6e6e6;
-         max-width: 640px; margin: 2rem auto; padding: 0 1rem; }
-  h1 { font-size: 1.1rem; }
-  input, button { font: inherit; padding: .4rem .6rem; background: #1f232a;
-                  color: inherit; border: 1px solid #3a3f47; border-radius: 4px; }
+  :root {
+    --bg: #14161a; --panel: #1d2127; --edge: #333a44; --ink: #e8e8e8;
+    --dim: #9aa3ae; --accent: #4cc38a; --warn: #e5a53a; --bad: #e0564f;
+    --key: #f2f2f2; --key-black: #22262c; --held: #4cc38a;
+  }
+  * { box-sizing: border-box; }
+  body { font-family: ui-monospace, "SF Mono", Menlo, monospace; background: var(--bg);
+         color: var(--ink); max-width: 860px; margin: 1.5rem auto; padding: 0 1rem; }
+  h1 { font-size: 1rem; letter-spacing: .06em; margin: 0; }
+  header { display: flex; align-items: center; gap: .8rem; flex-wrap: wrap;
+           margin-bottom: 1rem; }
+  .badge { padding: .15rem .55rem; border-radius: 999px; font-size: .75rem;
+           border: 1px solid var(--edge); color: var(--dim); }
+  .badge.live { color: var(--accent); border-color: var(--accent); }
+  .badge.stale { color: var(--warn); border-color: var(--warn); }
+  section { background: var(--panel); border: 1px solid var(--edge);
+            border-radius: 8px; padding: .9rem 1rem; margin-bottom: .9rem; }
+  section h2 { font-size: .72rem; text-transform: uppercase; letter-spacing: .12em;
+               color: var(--dim); margin: 0 0 .7rem; }
+  input[type=text], button { font: inherit; padding: .42rem .6rem;
+    background: #262b33; color: inherit; border: 1px solid var(--edge);
+    border-radius: 5px; }
   button { cursor: pointer; }
-  pre { background: #1f232a; padding: .8rem; border-radius: 4px; overflow-x: auto; }
+  button:hover { border-color: var(--dim); }
+  button.danger { color: var(--bad); border-color: var(--bad); }
+  .chips { display: flex; gap: .4rem; flex-wrap: wrap; margin-top: .55rem; }
+  .chips button { font-size: .75rem; padding: .25rem .55rem; color: var(--dim); }
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+           gap: .8rem; }
+  .stat .label { font-size: .68rem; color: var(--dim); text-transform: uppercase;
+                 letter-spacing: .1em; }
+  .stat .value { font-size: 1.05rem; margin-top: .15rem; }
+  .meter { height: 6px; background: #262b33; border-radius: 3px; margin-top: .35rem;
+           overflow: hidden; }
+  .meter > div { height: 100%; width: 0; background: var(--accent);
+                 transition: width .3s; }
+  .meter.over > div { background: var(--bad); }
+  .knobs { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+           gap: .6rem 1.4rem; }
+  .knob { display: grid; grid-template-columns: 8.5rem 1fr 3.2rem;
+          align-items: center; gap: .6rem; font-size: .8rem; }
+  .knob output { text-align: right; color: var(--dim); }
+  input[type=range] { width: 100%; accent-color: var(--accent); }
+  #keyboard { display: flex; position: relative; height: 110px; user-select: none; }
+  .white, .black { border: 1px solid #000; border-radius: 0 0 4px 4px; }
+  .white { flex: 1; background: var(--key); position: relative; z-index: 1; }
+  .black { position: absolute; width: 2.6%; height: 62%; background: var(--key-black);
+           z-index: 2; }
+  .white.held { background: var(--held); }
+  .black.held { background: var(--held); }
+  .row { display: flex; gap: .5rem; align-items: center; flex-wrap: wrap; }
+  .seg { display: inline-flex; border: 1px solid var(--edge); border-radius: 5px;
+         overflow: hidden; }
+  .seg button { border: 0; border-radius: 0; background: #262b33; color: var(--dim); }
+  .seg button.on { background: var(--accent); color: #10231a; }
+  .hint { font-size: .7rem; color: var(--dim); margin-top: .5rem; }
 </style>
 </head>
 <body>
-<h1>BioBeats Command Center</h1>
-<p>
-  <input id="prompt" placeholder="style prompt" size="40">
-  <button id="send">Send</button>
-  <button id="panic">Panic</button>
-</p>
-<pre id="status">no engine status yet</pre>
+
+<header>
+  <h1>BIOBEATS · RT2 COMMAND CENTER</h1>
+  <span id="conn" class="badge">no engine</span>
+  <span id="state" class="badge">–</span>
+</header>
+
+<section>
+  <h2>Engine</h2>
+  <div class="stats">
+    <div class="stat"><div class="label">chunk</div><div class="value" id="chunk">–</div></div>
+    <div class="stat"><div class="label">gen time / budget</div>
+      <div class="value" id="gen">–</div>
+      <div class="meter" id="genmeter"><div></div></div></div>
+    <div class="stat"><div class="label">buffered</div><div class="value" id="buffered">–</div></div>
+    <div class="stat"><div class="label">underruns</div><div class="value" id="underruns">–</div></div>
+    <div class="stat"><div class="label">held notes</div><div class="value" id="held">–</div></div>
+  </div>
+</section>
+
+<section>
+  <h2>Style</h2>
+  <div class="row">
+    <input type="text" id="prompt" placeholder="describe the music…" size="46">
+    <button id="sendPrompt">Send</button>
+  </div>
+  <div class="chips" id="presets"></div>
+  <div class="hint">active: <span id="activePrompt">–</span></div>
+</section>
+
+<section>
+  <h2>Sampler</h2>
+  <div class="knobs">
+    <label class="knob">intensity
+      <input type="range" id="k-intensity" min="0" max="1" step="0.01" value="0.5"
+             data-address="/rt2/intensity">
+      <output>0.50</output></label>
+    <label class="knob">temperature
+      <input type="range" id="k-temperature" min="0.1" max="4" step="0.05" value="1.3"
+             data-address="/rt2/temperature">
+      <output>1.30</output></label>
+    <label class="knob">top-k
+      <input type="range" id="k-topk" min="1" max="1024" step="1" value="40"
+             data-address="/rt2/topk" data-int="1">
+      <output>40</output></label>
+    <label class="knob">style cfg
+      <input type="range" id="k-cfg-style" min="-1" max="7" step="0.1" value="3"
+             data-address="/rt2/cfg/style">
+      <output>3.0</output></label>
+    <label class="knob">notes cfg
+      <input type="range" id="k-cfg-notes" min="-1" max="7" step="0.1" value="1"
+             data-address="/rt2/cfg/notes">
+      <output>1.0</output></label>
+    <label class="knob">drums cfg
+      <input type="range" id="k-cfg-drums" min="-1" max="7" step="0.1" value="1"
+             data-address="/rt2/cfg/drums">
+      <output>1.0</output></label>
+  </div>
+  <div class="hint">intensity drives temperature unless temperature is set explicitly;
+    knobs apply from the next 2s chunk</div>
+</section>
+
+<section>
+  <h2>Notes <span class="hint" style="display:inline">— click/drag, or play A–K row
+    (Z/X octave)</span></h2>
+  <div id="keyboard"></div>
+</section>
+
+<section>
+  <h2>Drums &amp; Transport</h2>
+  <div class="row">
+    <span class="seg" id="drumseg">
+      <button data-value="-1" class="on">free</button>
+      <button data-value="0">off</button>
+      <button data-value="1">on</button>
+    </span>
+    <span style="flex:1"></span>
+    <button id="panic">Panic (all notes off)</button>
+    <button id="stop" class="danger">Stop engine</button>
+  </div>
+</section>
+
 <script>
+'use strict';
+
 async function send(address, value) {
-  await fetch('/api/send', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({address, value}),
+  try {
+    await fetch('/api/send', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({address, value}),
+    });
+  } catch (err) { /* engine link is fire-and-forget, like OSC itself */ }
+}
+
+// --- style prompt ------------------------------------------------------------
+const PRESETS = [
+  'slow ambient pads, breathing space',
+  'driving rhythmic pulse, building energy',
+  'intense percussive peak, dense rhythm',
+  'dub techno, deep bassline, cavernous echo',
+  'solo piano, sparse, melancholic',
+  'funk groove, tight drums, clavinet',
+];
+const promptBox = document.getElementById('prompt');
+document.getElementById('sendPrompt').onclick = () => {
+  if (promptBox.value.trim()) send('/rt2/prompt', promptBox.value.trim());
+};
+promptBox.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') document.getElementById('sendPrompt').click();
+});
+const presetsEl = document.getElementById('presets');
+for (const p of PRESETS) {
+  const b = document.createElement('button');
+  b.textContent = p;
+  b.onclick = () => { promptBox.value = p; send('/rt2/prompt', p); };
+  presetsEl.appendChild(b);
+}
+
+// --- sampler knobs (throttled ~10Hz; engine snapshots per chunk anyway) -------
+for (const slider of document.querySelectorAll('input[type=range]')) {
+  const output = slider.parentElement.querySelector('output');
+  let timer = null;
+  slider.addEventListener('input', () => {
+    const value = slider.dataset.int ? parseInt(slider.value, 10)
+                                     : parseFloat(slider.value);
+    output.textContent = slider.dataset.int ? value : value.toFixed(2);
+    if (timer) return;
+    timer = setTimeout(() => {
+      timer = null;
+      send(slider.dataset.address,
+           slider.dataset.int ? parseInt(slider.value, 10)
+                              : parseFloat(slider.value));
+    }, 100);
   });
 }
-document.getElementById('send').onclick = () =>
-  send('/rt2/prompt', document.getElementById('prompt').value);
-document.getElementById('panic').onclick = () => send('/rt2/notes/clear', 1);
-setInterval(async () => {
-  const response = await fetch('/api/status');
-  const payload = await response.json();
-  document.getElementById('status').textContent =
-    JSON.stringify(payload, null, 2);
-}, 500);
+
+// --- keyboard ------------------------------------------------------------
+// Two octaves C3..C5 (MIDI 48..72). White keys flex; black keys absolute.
+const KB = document.getElementById('keyboard');
+const LOW = 48, HIGH = 72;
+const isBlack = (p) => [1, 3, 6, 8, 10].includes(p % 12);
+const held = new Set();
+const whites = [];
+for (let p = LOW; p <= HIGH; p++) if (!isBlack(p)) whites.push(p);
+for (const p of whites) {
+  const key = document.createElement('div');
+  key.className = 'white'; key.dataset.pitch = p;
+  KB.appendChild(key);
+}
+// Place black keys between their neighbors, measured in white-key widths.
+for (let p = LOW; p <= HIGH; p++) {
+  if (!isBlack(p)) continue;
+  const key = document.createElement('div');
+  key.className = 'black'; key.dataset.pitch = p;
+  const whitesBefore = whites.filter((w) => w < p).length;
+  key.style.left = `calc(${(whitesBefore / whites.length) * 100}% - 1.3%)`;
+  KB.appendChild(key);
+}
+function noteOn(p) {
+  if (held.has(p)) return;
+  held.add(p); send('/rt2/note/on', p); paint();
+}
+function noteOff(p) {
+  if (!held.delete(p)) return;
+  send('/rt2/note/off', p); paint();
+}
+function paint() {
+  for (const el of KB.children)
+    el.classList.toggle('held', held.has(+el.dataset.pitch));
+}
+let mouseDown = false;
+KB.addEventListener('pointerdown', (e) => {
+  const p = e.target.dataset.pitch; if (!p) return;
+  mouseDown = true; noteOn(+p);
+});
+KB.addEventListener('pointerover', (e) => {
+  if (!mouseDown) return;
+  const p = e.target.dataset.pitch; if (p) noteOn(+p);
+});
+KB.addEventListener('pointerout', (e) => {
+  if (!mouseDown) return;
+  const p = e.target.dataset.pitch; if (p) noteOff(+p);
+});
+window.addEventListener('pointerup', () => {
+  mouseDown = false;
+  for (const p of [...held]) noteOff(p);
+});
+
+// Computer keyboard: classic DAW layout on the home row, Z/X shifts octave.
+const KEYMAP = {a:0,w:1,s:2,e:3,d:4,f:5,t:6,g:7,y:8,h:9,u:10,j:11,k:12};
+let octaveBase = 60;
+window.addEventListener('keydown', (e) => {
+  if (e.repeat || e.target.tagName === 'INPUT') return;
+  if (e.key === 'z') { octaveBase = Math.max(24, octaveBase - 12); return; }
+  if (e.key === 'x') { octaveBase = Math.min(96, octaveBase + 12); return; }
+  if (e.key in KEYMAP) noteOn(octaveBase + KEYMAP[e.key]);
+});
+window.addEventListener('keyup', (e) => {
+  if (e.key in KEYMAP) noteOff(octaveBase + KEYMAP[e.key]);
+});
+
+// --- drums / transport ---------------------------------------------------
+const drumSeg = document.getElementById('drumseg');
+drumSeg.addEventListener('click', (e) => {
+  const v = e.target.dataset.value; if (v === undefined) return;
+  send('/rt2/drum', parseInt(v, 10));
+  for (const b of drumSeg.children) b.classList.toggle('on', b === e.target);
+});
+document.getElementById('panic').onclick = () => {
+  for (const p of [...held]) held.delete(p);
+  paint();
+  send('/rt2/notes/clear', 1);
+};
+document.getElementById('stop').onclick = () => {
+  if (confirm('Stop the engine? Generation ends after the current chunk.'))
+    send('/rt2/stop', 1);
+};
+
+// --- status poll ----------------------------------------------------------
+const $ = (id) => document.getElementById(id);
+function renderStatus(payload) {
+  const conn = $('conn');
+  if (!payload || payload.status === null) {
+    conn.textContent = 'no engine'; conn.className = 'badge';
+    return;
+  }
+  const fresh = payload.age_seconds !== null && payload.age_seconds < 6;
+  conn.textContent = fresh ? 'live' : `stale ${Math.round(payload.age_seconds)}s`;
+  conn.className = 'badge ' + (fresh ? 'live' : 'stale');
+  const s = payload.status;
+  $('state').textContent = s.state ?? '–';
+  $('chunk').textContent = s.chunk ?? '–';
+  $('held').textContent = s.held_notes ?? '–';
+  $('underruns').textContent = s.underruns ?? '–';
+  $('activePrompt').textContent = s.prompt ?? '–';
+  const frames = s.buffered_frames;
+  $('buffered').textContent =
+    frames == null ? '–' : (frames / 48000).toFixed(1) + 's';
+  if (s.gen_seconds != null && s.chunk_seconds != null) {
+    $('gen').textContent = `${s.gen_seconds.toFixed(2)}s / ${s.chunk_seconds}s`;
+    const meter = $('genmeter');
+    const frac = Math.min(1, s.gen_seconds / s.chunk_seconds);
+    meter.firstElementChild.style.width = (frac * 100) + '%';
+    meter.classList.toggle('over', s.gen_seconds > s.chunk_seconds);
+  }
+}
+async function poll() {
+  try {
+    const response = await fetch('/api/status');
+    renderStatus(await response.json());
+  } catch (err) {
+    renderStatus(null);
+  }
+}
+setInterval(poll, 500);
+poll();
 </script>
 </body>
 </html>
