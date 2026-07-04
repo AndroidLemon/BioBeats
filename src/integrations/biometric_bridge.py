@@ -100,12 +100,16 @@ class BiometricBridge:
         )
         forwarded = 0
         readings = 0
+        zone: str | None = None
         try:
             while not self._stop_event.is_set():
                 hr = await _latest_hr(queue, source_task, self._stop_event)
                 if hr is None:
                     break
-                conditioning = hr_to_conditioning(hr, self._hr_max)
+                conditioning = hr_to_conditioning(
+                    hr, self._hr_max, previous_zone=zone
+                )
+                zone = conditioning["zone"]
                 self._sender.send("/rt2/prompt", conditioning["prompt"])
                 self._sender.send("/rt2/intensity", conditioning["intensity"])
                 forwarded += 2

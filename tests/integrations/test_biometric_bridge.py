@@ -102,3 +102,29 @@ async def test_stop_before_run_is_honored():
     forwarded = await asyncio.wait_for(bridge.run(), timeout=5)
     assert forwarded == 0
     assert sender.sent == []
+
+
+class _PacedHRMonitor:
+    """Delivers each reading only after the previous one was fully forwarded
+    (2 sends), so the latest-wins drain can't collapse them into one."""
+
+    def __init__(self, readings, sender):
+        self._readings = readings
+        self._sender = sender
+
+    async def stream_hr(self, queue, interval=1.0):
+        for i, hr in enumerate(self._readings):
+            await queue.put(hr)
+            while len(self._sender.sent) < 2 * (i + 1):
+                await asyncio.sleep(0)
+
+
+async def test_zone_hysteresis_threads_across_readings():
+    # 125 bpm enters push; 119 straddles the boundary and must stay push
+    # rather than flap the prompt back to base for one reading.
+    sender = StubOSCClient()
+    bridge = BiometricBridge(_PacedHRMonitor([125, 119], sender), sender)
+    await asyncio.wait_for(bridge.run(), timeout=5)
+    prompts = [v for a, v in sender.sent if a == "/rt2/prompt"]
+    push_prompt = hr_to_conditioning(125, 185)["prompt"]
+    assert prompts == [push_prompt, push_prompt]
