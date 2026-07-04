@@ -35,6 +35,9 @@ def test_registers_all_control_handlers():
         "/rt2/drum",
         "/rt2/cfg/notes",
         "/rt2/cfg/drums",
+        "/rt2/cfg/style",
+        "/rt2/temperature",
+        "/rt2/topk",
     }
 
 
@@ -263,3 +266,42 @@ async def test_slower_than_realtime_generation_logs_warning(caplog):
     await engine.run(max_chunks=1)
     assert "slower than real time" in caplog.text
     assert engine.last_gen_seconds is not None and engine.last_gen_seconds > 0
+
+
+# --- sampler knobs (temperature / topk / cfg_style) --------------------------
+
+
+def test_intensity_defaults_to_unset():
+    engine, _, _, _ = _make_engine()
+    assert engine._snapshot_conditioning()["intensity"] is None
+
+
+def test_temperature_is_set_and_clamped():
+    engine, _, _, server = _make_engine()
+    assert engine._snapshot_conditioning()["temperature"] is None
+    server.dispatch("/rt2/temperature", 1.1)
+    assert engine._snapshot_conditioning()["temperature"] == 1.1
+    server.dispatch("/rt2/temperature", 99.0)
+    assert engine._snapshot_conditioning()["temperature"] == 4.0
+    server.dispatch("/rt2/temperature", 0.0)
+    assert engine._snapshot_conditioning()["temperature"] == 0.1
+
+
+def test_topk_requires_int_and_is_clamped():
+    engine, _, _, server = _make_engine()
+    server.dispatch("/rt2/topk", 40)
+    assert engine._snapshot_conditioning()["topk"] == 40
+    server.dispatch("/rt2/topk", 40.5)  # non-integer -> ignored
+    assert engine._snapshot_conditioning()["topk"] == 40
+    server.dispatch("/rt2/topk", 0)
+    assert engine._snapshot_conditioning()["topk"] == 1
+    server.dispatch("/rt2/topk", 100000)
+    assert engine._snapshot_conditioning()["topk"] == 1024
+
+
+def test_cfg_style_is_set_and_clamped():
+    engine, _, _, server = _make_engine()
+    server.dispatch("/rt2/cfg/style", 5.0)
+    assert engine._snapshot_conditioning()["cfg_style"] == 5.0
+    server.dispatch("/rt2/cfg/style", -99.0)
+    assert engine._snapshot_conditioning()["cfg_style"] == -1.0

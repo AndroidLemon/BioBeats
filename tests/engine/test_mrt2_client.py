@@ -160,3 +160,61 @@ def test_embed_cache_is_bounded(monkeypatch):
     for i in range(EMBED_CACHE_MAX + 10):
         client.update_conditioning({"prompt": f"p{i}"})
     assert len(client._style_cache) <= EMBED_CACHE_MAX
+
+
+def test_intensity_maps_to_temperature_when_no_override(monkeypatch):
+    _inject_fake_backend(monkeypatch)
+    from src.engine.mrt2_client import (
+        INTENSITY_TEMP_MAX,
+        INTENSITY_TEMP_MIN,
+        MRT2Client,
+    )
+
+    client = MRT2Client()
+    client.update_conditioning({"prompt": "ambient", "intensity": 0.0})
+    client.generate_chunk()
+    assert client._mrt.last_generate_kwargs["temperature"] == INTENSITY_TEMP_MIN
+
+    client.update_conditioning({"prompt": "ambient", "intensity": 1.0})
+    client.generate_chunk()
+    assert client._mrt.last_generate_kwargs["temperature"] == INTENSITY_TEMP_MAX
+
+
+def test_explicit_temperature_overrides_intensity(monkeypatch):
+    _inject_fake_backend(monkeypatch)
+    from src.engine.mrt2_client import MRT2Client
+
+    client = MRT2Client()
+    client.update_conditioning(
+        {"prompt": "ambient", "intensity": 1.0, "temperature": 0.7}
+    )
+    client.generate_chunk()
+    assert client._mrt.last_generate_kwargs["temperature"] == 0.7
+
+
+def test_sampler_knobs_default_to_model_defaults(monkeypatch):
+    _inject_fake_backend(monkeypatch)
+    from src.engine.mrt2_client import MRT2Client
+
+    client = MRT2Client()
+    client.update_conditioning({"prompt": "ambient"})
+    client.generate_chunk()
+    kwargs = client._mrt.last_generate_kwargs
+    # No intensity, no overrides: leave every sampler knob to the model.
+    assert kwargs["temperature"] is None
+    assert kwargs["top_k"] is None
+    assert kwargs["cfg_musiccoca"] is None
+
+
+def test_topk_and_style_cfg_threaded_into_generate(monkeypatch):
+    _inject_fake_backend(monkeypatch)
+    from src.engine.mrt2_client import MRT2Client
+
+    client = MRT2Client()
+    client.update_conditioning(
+        {"prompt": "ambient", "topk": 12, "cfg_style": 5.0}
+    )
+    client.generate_chunk()
+    kwargs = client._mrt.last_generate_kwargs
+    assert kwargs["top_k"] == 12
+    assert kwargs["cfg_musiccoca"] == 5.0

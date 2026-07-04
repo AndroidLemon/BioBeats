@@ -68,6 +68,13 @@ CHUNK_FRAMES = int(FRAMES_PER_SECOND * CHUNK_SECONDS)  # 50 frames -> 2s
 # an embed that steals time from the generation budget. Bounded FIFO eviction.
 EMBED_CACHE_MAX = 32
 
+# Intensity (0..1, from HR zones / MIDI velocity / CC) maps to sampling
+# temperature so it is actually audible: calm -> conservative sampling, hot ->
+# wilder. The range brackets the model's own default (1.3) so intensity 0.5 is
+# neutral. An explicit /rt2/temperature override always wins.
+INTENSITY_TEMP_MIN = 1.0
+INTENSITY_TEMP_MAX = 1.6
+
 
 class MRT2Client:
     """Real Magenta RT2 client (MLX / Apple Silicon).
@@ -97,6 +104,9 @@ class MRT2Client:
         self._drums: list[int] | None = None
         self._cfg_notes: float | None = None
         self._cfg_drums: float | None = None
+        self._cfg_style: float | None = None
+        self._temperature: float | None = None
+        self._topk: int | None = None
         self._mrt, self._style = self._executor.submit(
             self._load_backend, size, default_prompt
         ).result()
@@ -113,10 +123,11 @@ class MRT2Client:
     def update_conditioning(self, conditioning: dict) -> None:
         """Apply the latest conditioning. Re-embed the style only on prompt change.
 
-        notes/drums/cfg are cheap to set and stored for the next generate():
-        notes is RT2's 128-int pitch-state vector (or None), drums a 1-int list
-        (or None), and the CFG scales are per-channel floats (or None for the
-        model's defaults).
+        notes/drums/cfg/sampler knobs are cheap to set and stored for the next
+        generate(): notes is RT2's 128-int pitch-state vector (or None), drums
+        a 1-int list (or None), the CFG scales per-channel floats (or None for
+        the model's defaults). Temperature resolves as: explicit "temperature"
+        override > intensity-derived (INTENSITY_TEMP_MIN..MAX) > model default.
         """
         prompt = conditioning["prompt"]
         if prompt != self._prompt:
@@ -126,6 +137,16 @@ class MRT2Client:
         self._drums = conditioning.get("drums")
         self._cfg_notes = conditioning.get("cfg_notes")
         self._cfg_drums = conditioning.get("cfg_drums")
+        self._cfg_style = conditioning.get("cfg_style")
+        self._topk = conditioning.get("topk")
+        temperature = conditioning.get("temperature")
+        if temperature is None:
+            intensity = conditioning.get("intensity")
+            if intensity is not None:
+                temperature = INTENSITY_TEMP_MIN + float(intensity) * (
+                    INTENSITY_TEMP_MAX - INTENSITY_TEMP_MIN
+                )
+        self._temperature = temperature
 
     def _embed_cached(self, prompt: str):
         """Return the style embedding for `prompt`, embedding once per prompt."""
@@ -147,6 +168,9 @@ class MRT2Client:
             drums=self._drums,
             cfg_notes=self._cfg_notes,
             cfg_drums=self._cfg_drums,
+            cfg_musiccoca=self._cfg_style,
+            temperature=self._temperature,
+            top_k=self._topk,
             frames=CHUNK_FRAMES,
             state=self._state,
         ).result()

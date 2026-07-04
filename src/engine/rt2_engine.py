@@ -14,13 +14,17 @@
 # in the real OSCServer, so this module imports clean on CI.
 #
 # OSC address space (control-rate; one model + one sink behind it):
-#   /rt2/prompt      s   style prompt (re-embeds only on change)
-#   /rt2/intensity   f   advisory 0..1 intensity carried in the conditioning
+#   /rt2/prompt      s   style prompt (re-embeds only on change, cached)
+#   /rt2/intensity   f   0..1 energy; maps to sampling temperature unless
+#                        /rt2/temperature overrides it explicitly
 #   /rt2/note/on     i   pitch 0-127 pressed (an onset this chunk, then held)
 #   /rt2/note/off    i   pitch 0-127 released
 #   /rt2/drum        i   -1 masked / 0 no-drum / 1 play-drum
 #   /rt2/cfg/notes   f   classifier-free-guidance scale for notes  (-1..7)
 #   /rt2/cfg/drums   f   classifier-free-guidance scale for drums  (-1..7)
+#   /rt2/cfg/style   f   classifier-free-guidance scale for style  (-1..7)
+#   /rt2/temperature f   sampling temperature (0.1..4.0; unset -> model default)
+#   /rt2/topk        i   sampling top-k       (1..1024;  unset -> model default)
 #
 # Notes use the SPARSE protocol: senders just press/release pitches, and the
 # engine (which owns chunk boundaries) tracks held pitches and expands them into
@@ -43,6 +47,10 @@ logger = logging.getLogger(__name__)
 NUM_PITCHES = 128  # RT2 notes conditioning is one state per MIDI pitch 0-127
 CFG_MIN = -1.0
 CFG_MAX = 7.0
+TEMPERATURE_MIN = 0.1
+TEMPERATURE_MAX = 4.0
+TOPK_MIN = 1
+TOPK_MAX = 1024
 # Pacing: generate until this many chunks are queued for playback, then wait.
 # Enough headroom to absorb a slow chunk; small enough that a control change
 # (note-on, new prompt) is audible within a couple of chunks.
@@ -87,7 +95,7 @@ class RT2Engine:
         server: OSCServerProtocol,
         *,
         default_prompt: str = "ambient",
-        default_intensity: float = 0.0,
+        default_intensity: float | None = None,
     ) -> None:
         self._mrt = mrt
         self._sink = sink
@@ -101,9 +109,12 @@ class RT2Engine:
         self._held: set[int] = set()
         self._onsets: set[int] = set()
         self._drum = -1
-        # Per-channel CFG overrides (None -> the model's own defaults).
+        # Per-channel CFG + sampler overrides (None -> the model's own defaults).
         self._cfg_notes: float | None = None
         self._cfg_drums: float | None = None
+        self._cfg_style: float | None = None
+        self._temperature: float | None = None
+        self._topk: int | None = None
         self._running = False
         self._max_chunks: int | None = None
         self._produced = 0
@@ -121,6 +132,9 @@ class RT2Engine:
         self._server.map("/rt2/drum", self._on_drum)
         self._server.map("/rt2/cfg/notes", self._on_cfg_notes)
         self._server.map("/rt2/cfg/drums", self._on_cfg_drums)
+        self._server.map("/rt2/cfg/style", self._on_cfg_style)
+        self._server.map("/rt2/temperature", self._on_temperature)
+        self._server.map("/rt2/topk", self._on_topk)
 
     def _on_prompt(self, address: str, *args) -> None:
         """/rt2/prompt <string> — set the style prompt for the next chunk."""
@@ -178,21 +192,56 @@ class RT2Engine:
         """/rt2/cfg/drums <float> — drums classifier-free-guidance scale (-1..7)."""
         self._set_cfg(address, args, "drums")
 
+    def _on_cfg_style(self, address: str, *args) -> None:
+        """/rt2/cfg/style <float> — style (MusicCoCa) CFG scale (-1..7)."""
+        self._set_cfg(address, args, "style")
+
     def _set_cfg(self, address: str, args, channel: str) -> None:
-        if not args:
-            logger.warning("ignoring %s: no argument", address)
-            return
-        try:
-            scale = float(args[0])
-        except (TypeError, ValueError):
-            logger.warning("ignoring %s: non-numeric argument %r", address, args[0])
+        scale = self._coerce_float(address, args)
+        if scale is None:
             return
         scale = max(CFG_MIN, min(CFG_MAX, scale))
         with self._lock:
             if channel == "notes":
                 self._cfg_notes = scale
-            else:
+            elif channel == "drums":
                 self._cfg_drums = scale
+            else:
+                self._cfg_style = scale
+
+    def _on_temperature(self, address: str, *args) -> None:
+        """/rt2/temperature <float> — sampling temperature, clamped 0.1..4.0.
+
+        An explicit temperature wins over the intensity-derived one (see
+        MRT2Client.update_conditioning).
+        """
+        temperature = self._coerce_float(address, args)
+        if temperature is None:
+            return
+        with self._lock:
+            self._temperature = max(
+                TEMPERATURE_MIN, min(TEMPERATURE_MAX, temperature)
+            )
+
+    def _on_topk(self, address: str, *args) -> None:
+        """/rt2/topk <int> — sampling top-k, clamped 1..1024."""
+        topk = _coerce_int(address, args)
+        if topk is None:
+            return
+        with self._lock:
+            self._topk = max(TOPK_MIN, min(TOPK_MAX, topk))
+
+    @staticmethod
+    def _coerce_float(address: str, args) -> float | None:
+        """Parse a single float OSC arg, or None (logged) if missing/non-numeric."""
+        if not args:
+            logger.warning("ignoring %s: no argument", address)
+            return None
+        try:
+            return float(args[0])
+        except (TypeError, ValueError):
+            logger.warning("ignoring %s: non-numeric argument %r", address, args[0])
+            return None
 
     def _snapshot_conditioning(self) -> dict:
         """Build the conditioning for the next chunk and advance note state.
@@ -220,6 +269,9 @@ class RT2Engine:
                 "drums": drums,
                 "cfg_notes": self._cfg_notes,
                 "cfg_drums": self._cfg_drums,
+                "cfg_style": self._cfg_style,
+                "temperature": self._temperature,
+                "topk": self._topk,
             }
 
     def stop(self) -> None:
