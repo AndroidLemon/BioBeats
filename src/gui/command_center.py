@@ -15,6 +15,7 @@
 
 import json
 import logging
+import math
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -28,6 +29,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_HTTP_HOST = "127.0.0.1"
 DEFAULT_HTTP_PORT = 8000
 DEFAULT_STATUS_PORT = 5006  # where the GUI listens for /rt2/status
+MAX_BODY_BYTES = 64 * 1024  # /api/send bodies are tiny; anything huge is hostile
 
 _HTML_PATH = Path(__file__).parent / "index.html"
 
@@ -50,6 +52,10 @@ def parse_send(body: bytes) -> tuple[str, object]:
         raise ValueError(f"address must be an /rt2/* string, got {address!r}")
     if isinstance(value, bool) or not isinstance(value, (str, int, float)):
         raise ValueError(f"value must be a string or number, got {value!r}")
+    # json.loads accepts the non-standard NaN/Infinity literals; a NaN would
+    # then pass the engine's max(lo, min(hi, x)) clamps as the MAXIMUM.
+    if isinstance(value, float) and not math.isfinite(value):
+        raise ValueError("value must be finite")
     return address, value
 
 
@@ -119,6 +125,8 @@ def _make_handler(center: CommandCenter, html: bytes):
     """HTTP handler class closed over the command center and the page bytes."""
 
     class Handler(BaseHTTPRequestHandler):
+        timeout = 10  # a stalled client must not pin a worker thread forever
+
         def log_message(self, format, *args):  # noqa: A002 - stdlib signature
             logger.debug("http: " + format, *args)
 
@@ -144,7 +152,23 @@ def _make_handler(center: CommandCenter, html: bytes):
             if self.path != "/api/send":
                 self._reply_json(404, {"error": "not found"})
                 return
-            length = int(self.headers.get("Content-Length") or 0)
+            # Requiring JSON forces browsers to CORS-preflight this endpoint,
+            # so a hostile page's "simple" text/plain POST can't drive the rig.
+            content_type = (self.headers.get("Content-Type") or "").split(";")[0]
+            if content_type.strip().lower() != "application/json":
+                self._reply_json(415, {"error": "Content-Type must be application/json"})
+                return
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+            except ValueError:
+                self._reply_json(400, {"error": "invalid Content-Length"})
+                return
+            if length < 0:
+                self._reply_json(400, {"error": "invalid Content-Length"})
+                return
+            if length > MAX_BODY_BYTES:
+                self._reply_json(413, {"error": "body too large"})
+                return
             body = self.rfile.read(length)
             try:
                 address, value = parse_send(body)

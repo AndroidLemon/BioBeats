@@ -137,3 +137,61 @@ def test_unknown_paths_are_404(http_center):
     with pytest.raises(urllib.error.HTTPError) as excinfo:
         urllib.request.urlopen(http_center[2] + "/nope", timeout=5)
     assert excinfo.value.code == 404
+
+
+# --- hostile / malformed HTTP ------------------------------------------------
+
+
+def test_parse_send_rejects_nonfinite_numbers():
+    # Python's json.loads accepts NaN/Infinity; NaN slips through clamps as the
+    # MAXIMUM (min(hi, nan) returns hi), slamming knobs to extremes. Reject.
+    for bad in (b"NaN", b"Infinity", b"-Infinity", b"1e999"):
+        with pytest.raises(ValueError):
+            parse_send(b'{"address": "/rt2/temperature", "value": ' + bad + b"}")
+
+
+def _raw_post(base, path, body: bytes, headers: dict):
+    request = urllib.request.Request(
+        base + path, data=body, headers=headers, method="POST"
+    )
+    return urllib.request.urlopen(request, timeout=5)
+
+
+def test_post_without_json_content_type_is_rejected(http_center):
+    # Forces browsers to CORS-preflight /api/send: a hostile page's "simple"
+    # text/plain POST must not be able to drive the engine.
+    _, sender, base = http_center
+    with pytest.raises(urllib.error.HTTPError) as excinfo:
+        _raw_post(
+            base,
+            "/api/send",
+            b'{"address": "/rt2/stop", "value": 1}',
+            {"Content-Type": "text/plain"},
+        )
+    assert excinfo.value.code == 415
+    assert sender.sent == []
+
+
+def test_bad_content_length_is_a_400_not_a_crash(http_center):
+    import http.client
+
+    _, sender, base = http_center
+    host, port = base.removeprefix("http://").split(":")
+    conn = http.client.HTTPConnection(host, int(port), timeout=5)
+    conn.putrequest("POST", "/api/send")
+    conn.putheader("Content-Type", "application/json")
+    conn.putheader("Content-Length", "not-a-number")
+    conn.endheaders()
+    response = conn.getresponse()
+    assert response.status == 400
+    conn.close()
+    assert sender.sent == []
+
+
+def test_oversized_body_is_rejected(http_center):
+    _, sender, base = http_center
+    huge = b'{"address": "/rt2/prompt", "value": "' + b"x" * 100_000 + b'"}'
+    with pytest.raises(urllib.error.HTTPError) as excinfo:
+        _raw_post(base, "/api/send", huge, {"Content-Type": "application/json"})
+    assert excinfo.value.code == 413
+    assert sender.sent == []
