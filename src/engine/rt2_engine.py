@@ -35,12 +35,14 @@
 # (0). With nothing held, notes are left masked (None) so the model roams.
 
 import asyncio
+import json
 import logging
 import threading
 import time
 
 from src.engine.fsm import Event, State, next_state
 from src.engine.mrt2_client import MRT2ClientProtocol
+from src.integrations.osc_client import OSCSenderProtocol
 from src.integrations.osc_server import OSCServerProtocol
 from src.output.audio_sink import SAMPLE_RATE, AudioSinkProtocol
 
@@ -98,10 +100,12 @@ class RT2Engine:
         *,
         default_prompt: str = "ambient",
         default_intensity: float | None = None,
+        status_sender: OSCSenderProtocol | None = None,
     ) -> None:
         self._mrt = mrt
         self._sink = sink
         self._server = server
+        self._status = status_sender
         self._lock = threading.Lock()
         # Style / intensity conditioning.
         self._prompt = default_prompt
@@ -294,6 +298,42 @@ class RT2Engine:
         """Request the generate loop to stop after the current chunk."""
         self._running = False
 
+    def _publish_status(self, state: State) -> None:
+        """Send one /rt2/status JSON blob to the status sender, if configured.
+
+        Read-only: unlike _snapshot_conditioning it must NOT advance note
+        state. A failing status sender is logged and ignored — observability
+        must never take the audio down.
+        """
+        if self._status is None:
+            return
+        with self._lock:
+            payload = {
+                "state": state.name,
+                "chunk": self._produced,
+                "gen_seconds": self.last_gen_seconds,
+                "chunk_seconds": (
+                    self._high_water / (TARGET_BUFFER_CHUNKS * SAMPLE_RATE)
+                    if self._high_water is not None
+                    else None
+                ),
+                "prompt": self._prompt,
+                "intensity": self._intensity,
+                "temperature": self._temperature,
+                "topk": self._topk,
+                "cfg_notes": self._cfg_notes,
+                "cfg_drums": self._cfg_drums,
+                "cfg_style": self._cfg_style,
+                "held_notes": len(self._held),
+                "drum": self._drum,
+            }
+        payload["buffered_frames"] = self._sink.buffered_frames()
+        payload["underruns"] = self._sink.underruns()
+        try:
+            self._status.send("/rt2/status", json.dumps(payload))
+        except Exception:
+            logger.warning("status sender failed; continuing", exc_info=True)
+
     async def _stream_session(self, serve_task: asyncio.Task) -> State:
         """Run one streaming session, settling to IDLE on a clean stop.
 
@@ -338,6 +378,7 @@ class RT2Engine:
                 self._high_water = TARGET_BUFFER_CHUNKS * chunk.shape[0]
             self._produced += 1
             state = next_state(state, Event.CHUNK)  # -> STREAMING
+            self._publish_status(state)
         return next_state(state, Event.STOP)  # -> IDLE
 
     async def run(self, max_chunks: int | None = None, max_retries: int = 3) -> State:
@@ -377,6 +418,7 @@ class RT2Engine:
                     state = next_state(state, Event.RECOVER)  # -> IDLE, retry
         finally:
             self._running = False
+            self._publish_status(State.IDLE)  # terminal state for observers
             self._server.shutdown()
             self._sink.stop()
             # serve() returns once shutdown() lands. Surface (don't swallow) a

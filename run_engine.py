@@ -44,7 +44,25 @@ def parse_args(argv=None) -> argparse.Namespace:
         default=None,
         help="Record generated audio to this WAV file (48kHz stereo, 16-bit).",
     )
-    return parser.parse_args(argv)
+    parser.add_argument(
+        "--status-host",
+        default=None,
+        help=(
+            "Optional OSC destination host for /rt2/status feedback (state, "
+            "chunk timing, active conditioning) — e.g. the GUI command "
+            "center. Requires --status-port."
+        ),
+    )
+    parser.add_argument(
+        "--status-port",
+        type=int,
+        default=None,
+        help="Optional OSC destination port for /rt2/status. Requires --status-host.",
+    )
+    args = parser.parse_args(argv)
+    if (args.status_host is None) != (args.status_port is None):
+        parser.error("--status-host and --status-port must be given together")
+    return args
 
 
 def build_engine(args: argparse.Namespace) -> RT2Engine:
@@ -71,7 +89,18 @@ def build_engine(args: argparse.Namespace) -> RT2Engine:
 
         sink = RecordingAudioSink(sink, args.record_audio)
 
-    return RT2Engine(mrt, sink, server, default_prompt=args.prompt)
+    status = None
+    if args.status_host is not None:
+        if args.stub:
+            from stubs.osc_client_stub import StubOSCClient
+
+            status = StubOSCClient()
+        else:
+            from src.integrations.osc_client import OSCClient
+
+            status = OSCClient(host=args.status_host, port=args.status_port)
+
+    return RT2Engine(mrt, sink, server, default_prompt=args.prompt, status_sender=status)
 
 
 async def main_async(argv=None) -> State:

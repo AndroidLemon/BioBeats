@@ -334,3 +334,58 @@ async def test_stop_channel_terminates_run():
     final = await asyncio.wait_for(engine.run(), timeout=5)
     assert final == State.IDLE
     assert sink.chunks_written == 1
+
+
+# --- status feedback ---------------------------------------------------------
+
+
+def _status_messages(sender):
+    import json
+
+    return [json.loads(v) for a, v in sender.sent if a == "/rt2/status"]
+
+
+async def test_status_published_per_chunk_and_on_exit():
+    from stubs.osc_client_stub import StubOSCClient
+
+    status = StubOSCClient()
+    mrt = StubMRT2Client()
+    sink = NullAudioSink()
+    server = StubOSCServer()
+    engine = RT2Engine(mrt, sink, server, status_sender=status)
+    server.dispatch("/rt2/prompt", "deep dub")
+    server.dispatch("/rt2/note/on", 60)
+    await engine.run(max_chunks=2)
+
+    messages = _status_messages(status)
+    assert len(messages) == 3  # one per chunk + terminal
+    first, last = messages[0], messages[-1]
+    assert first["state"] == "STREAMING"
+    assert first["chunk"] == 1
+    assert first["prompt"] == "deep dub"
+    assert first["held_notes"] == 1
+    assert first["gen_seconds"] >= 0
+    assert first["chunk_seconds"] > 0
+    assert first["buffered_frames"] == 0
+    assert first["underruns"] == 0
+    assert last["state"] == "IDLE"
+    assert last["chunk"] == 2
+
+
+async def test_broken_status_sender_does_not_kill_generation(caplog):
+    class _ExplodingSender:
+        def send(self, address, value):
+            raise OSError("status socket gone")
+
+    engine, _, sink, _ = _make_engine()
+    engine._status = _ExplodingSender()
+    final = await asyncio.wait_for(engine.run(max_chunks=2), timeout=5)
+    assert final == State.IDLE
+    assert sink.chunks_written == 2
+
+
+async def test_no_status_sender_publishes_nothing():
+    engine, _, sink, _ = _make_engine()
+    final = await engine.run(max_chunks=1)
+    assert final == State.IDLE
+    assert sink.chunks_written == 1
