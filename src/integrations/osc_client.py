@@ -2,8 +2,8 @@
 # MIDI and biometric bridges) to feed conditioning into a running RT2Engine.
 #
 # This keeps adapters "just another OSC client": they speak the same wire
-# protocol and address space (/rt2/prompt, /rt2/intensity — see rt2_engine.py)
-# as SuperCollider, Max/MSP, or TouchOSC would, over loopback UDP. No coupling
+# protocol and /rt2/* address space (see rt2_engine.py for the full channel
+# list) as SuperCollider, Max/MSP, or TouchOSC would, over loopback UDP. No coupling
 # to RT2Engine internals; swapping in a different control source means nothing
 # in the engine has to change.
 #

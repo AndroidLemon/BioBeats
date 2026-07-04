@@ -1,7 +1,7 @@
 # Stub for src/output/audio_sink.py.
 # NullAudioSink implements AudioSinkProtocol but produces no sound. It records
 # how many frames/chunks were written so integration tests (which run on CI
-# with no audio device) can assert the pipeline pushed audio to the output.
+# with no audio device) can assert the engine pushed audio to the output.
 
 import numpy as np
 

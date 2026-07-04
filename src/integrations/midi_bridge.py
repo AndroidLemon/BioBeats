@@ -4,8 +4,8 @@
 # and biometric bridge, one layer further out: a MIDI device or tool (Dubler
 # 2, a keyboard, a controller, a DAW's virtual port, ...) drives RT2 by playing
 # notes and twisting knobs. The bridge owns one MIDISourceProtocol + one
-# OSCSenderProtocol — it is "just another OSC client" feeding the same
-# /rt2/prompt and /rt2/intensity addresses RT2Engine listens on (loopback UDP),
+# OSCSenderProtocol — it is "just another OSC client" speaking the same /rt2/*
+# address space RT2Engine listens on (loopback UDP; notes, drums, intensity),
 # so nothing in the bridge has to change to support a new control surface.
 #
 # Unlike RT2Engine's chunk-paced latest-wins loop, every MIDI message is
@@ -29,7 +29,7 @@ async def _next_message(queue: asyncio.Queue, producer: asyncio.Task, stop_event
 
     Every message matters here — note_on/CC events are discrete gestures, not
     a continuously-resampled signal — so messages come back one at a time, in
-    order (no latest-wins collapsing, unlike _next_latest_hr in src/pipeline.py).
+    order (no latest-wins collapsing, unlike _latest_hr in the biometric bridge).
     Blocks until a message is available, the producer completes, or stop_event
     is set — racing on stop_event is what lets stop() interrupt a bridge that's
     idling on an empty queue (e.g. a MIDI controller with no current activity).

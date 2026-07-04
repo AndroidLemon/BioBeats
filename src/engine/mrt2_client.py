@@ -1,9 +1,9 @@
 # Magenta RT2 engine client.
 #
 # This file owns the ONLY RT2-version-specific code in the project. Everything
-# else (pipeline, stubs, tests) depends on MRT2ClientProtocol below, never on a
-# concrete model version. The real MRT2Client (added later) lazy-imports the RT2
-# package so this module stays import-clean without the model installed.
+# else (engine, stubs, tests) depends on MRT2ClientProtocol below, never on a
+# concrete model version. The real MRT2Client lazy-imports the RT2 package so
+# this module stays import-clean without the model installed.
 
 from concurrent.futures import ThreadPoolExecutor
 from typing import Protocol, runtime_checkable
@@ -75,7 +75,7 @@ class MRT2Client:
 
     MLX binds its GPU command stream to the thread that builds the model graph;
     calling into the model from a different thread raises "There is no
-    Stream(gpu, N) in current thread." The pipeline already runs generate_chunk
+    Stream(gpu, N) in current thread." The engine already runs generate_chunk
     via asyncio.to_thread (to keep the event loop responsive), and that may pick
     a different worker thread than __init__ ran on — and a different one between
     calls. So every MLX touchpoint (construction, embedding, generation) is

@@ -1,8 +1,8 @@
 # Audio output sink.
 #
 # Defines AudioSinkProtocol, the interface shared by the real sounddevice-backed
-# sink (added later, lazy-imports sounddevice) and the NullAudioSink stub. The
-# pipeline depends only on this Protocol.
+# sink (which lazy-imports sounddevice) and the NullAudioSink stub. The engine
+# depends only on this Protocol.
 
 import threading
 from collections import deque
