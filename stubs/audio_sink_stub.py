@@ -28,6 +28,14 @@ class NullAudioSink:
         self.frames_written += samples.shape[0]
         self.chunks_written += 1
 
+    def buffered_frames(self) -> int:
+        """No playback queue: everything is 'played' instantly."""
+        return 0
+
+    def underruns(self) -> int:
+        """No playback: never underruns."""
+        return 0
+
     def stop(self) -> None:
         """Mark the sink as stopped. Idempotent."""
         self.stopped = True

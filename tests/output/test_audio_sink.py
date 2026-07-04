@@ -116,3 +116,36 @@ def test_partial_chunk_consumed_across_callbacks(monkeypatch):
     out2 = np.zeros((2, 2), dtype=np.float32)
     captured["callback"](out2, 2, None, None)
     assert np.allclose(out2, [[3, 3], [4, 4]])
+
+
+def test_buffered_frames_tracks_queue_depth(monkeypatch):
+    captured = _install_fake_sounddevice(monkeypatch)
+    sink = AudioSink(blocksize=4)
+    sink.start()
+    assert sink.buffered_frames() == 0
+    sink.write(np.ones((6, 2), dtype=np.float32))
+    assert sink.buffered_frames() == 6
+    out = np.zeros((4, 2), dtype=np.float32)
+    captured["callback"](out, 4, None, None)
+    assert sink.buffered_frames() == 2  # 4 of 6 frames consumed
+
+
+def test_underruns_counted_only_after_first_write(monkeypatch):
+    captured = _install_fake_sounddevice(monkeypatch)
+    sink = AudioSink(blocksize=4)
+    sink.start()
+    out = np.zeros((4, 2), dtype=np.float32)
+    captured["callback"](out, 4, None, None)  # startup gap: not an underrun
+    assert sink.underruns() == 0
+    sink.write(np.ones((2, 2), dtype=np.float32))
+    captured["callback"](out, 4, None, None)  # short fill mid-stream
+    assert sink.underruns() == 1
+    captured["callback"](out, 4, None, None)  # empty again
+    assert sink.underruns() == 2
+
+
+def test_null_sink_reports_zero_buffer_and_underruns():
+    sink = NullAudioSink()
+    sink.write(np.ones((4, 2), dtype=np.float32))
+    assert sink.buffered_frames() == 0
+    assert sink.underruns() == 0

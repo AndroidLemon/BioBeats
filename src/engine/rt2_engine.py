@@ -31,17 +31,23 @@
 import asyncio
 import logging
 import threading
+import time
 
 from src.engine.fsm import Event, State, next_state
 from src.engine.mrt2_client import MRT2ClientProtocol
 from src.integrations.osc_server import OSCServerProtocol
-from src.output.audio_sink import AudioSinkProtocol
+from src.output.audio_sink import SAMPLE_RATE, AudioSinkProtocol
 
 logger = logging.getLogger(__name__)
 
 NUM_PITCHES = 128  # RT2 notes conditioning is one state per MIDI pitch 0-127
 CFG_MIN = -1.0
 CFG_MAX = 7.0
+# Pacing: generate until this many chunks are queued for playback, then wait.
+# Enough headroom to absorb a slow chunk; small enough that a control change
+# (note-on, new prompt) is audible within a couple of chunks.
+TARGET_BUFFER_CHUNKS = 2
+PACE_POLL_SECONDS = 0.05
 
 
 def _coerce_int(address: str, args) -> int | None:
@@ -101,6 +107,9 @@ class RT2Engine:
         self._running = False
         self._max_chunks: int | None = None
         self._produced = 0
+        # Latency instrumentation, refreshed per chunk (readable by observers).
+        self.last_gen_seconds: float | None = None
+        self._high_water: int | None = None  # frames; set from the first chunk
         self._register()
 
     def _register(self) -> None:
@@ -232,11 +241,33 @@ class RT2Engine:
                 raise RuntimeError("OSC control surface died mid-session")
             if self._max_chunks is not None and self._produced >= self._max_chunks:
                 break
+            # Pace generation against playback: an unbounded backlog means
+            # unbounded control-to-audio latency, so once enough audio is
+            # queued, wait for the sink to drain before generating more.
+            if (
+                self._high_water is not None
+                and self._sink.buffered_frames() >= self._high_water
+            ):
+                await asyncio.sleep(PACE_POLL_SECONDS)
+                continue
             self._mrt.update_conditioning(self._snapshot_conditioning())
             state = next_state(state, Event.TICK)  # -> GENERATING
             # The model call blocks (MLX); keep the event loop responsive.
+            started = time.monotonic()
             chunk = await asyncio.to_thread(self._mrt.generate_chunk)
+            self.last_gen_seconds = time.monotonic() - started
+            chunk_seconds = chunk.shape[0] / SAMPLE_RATE
+            if self.last_gen_seconds > chunk_seconds:
+                logger.warning(
+                    "chunk %d took %.2fs to generate (> %.2fs budget): "
+                    "model is slower than real time",
+                    self._produced,
+                    self.last_gen_seconds,
+                    chunk_seconds,
+                )
             self._sink.write(chunk)
+            if self._high_water is None:
+                self._high_water = TARGET_BUFFER_CHUNKS * chunk.shape[0]
             self._produced += 1
             state = next_state(state, Event.CHUNK)  # -> STREAMING
         return next_state(state, Event.STOP)  # -> IDLE

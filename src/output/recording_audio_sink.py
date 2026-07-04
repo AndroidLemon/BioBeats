@@ -56,6 +56,14 @@ class RecordingAudioSink:
             self._wav.writeframes(self._to_pcm16(samples))
         self._inner.write(samples)
 
+    def buffered_frames(self) -> int:
+        """Forward to the inner sink (recording adds no playback queue)."""
+        return self._inner.buffered_frames()
+
+    def underruns(self) -> int:
+        """Forward to the inner sink."""
+        return self._inner.underruns()
+
     def stop(self) -> None:
         """Stop the inner sink and close the WAV. The WAV is always finalized."""
         try:

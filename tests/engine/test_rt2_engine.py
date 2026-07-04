@@ -219,3 +219,47 @@ async def test_server_death_is_an_error_not_a_clean_stop(caplog):
     assert sink.stopped is True
     assert "control surface died" in caplog.text
     assert "OSC server thread failed" in caplog.text
+
+
+class _CongestedSink(NullAudioSink):
+    """Sink that reports a deep playback backlog for its first few polls."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.polls = 0
+
+    def buffered_frames(self) -> int:
+        self.polls += 1
+        return 10_000_000 if self.polls < 3 else 0
+
+
+async def test_generation_paces_against_playback_backlog():
+    # With more than TARGET_BUFFER_CHUNKS queued, the engine must wait instead
+    # of generating further ahead (unbounded backlog = unbounded control
+    # latency). The congested sink clears after two polls; both chunks land.
+    mrt = StubMRT2Client()
+    sink = _CongestedSink()
+    engine = RT2Engine(mrt, sink, StubOSCServer())
+    final = await asyncio.wait_for(engine.run(max_chunks=2), timeout=5)
+    assert final == State.IDLE
+    assert sink.chunks_written == 2
+    assert sink.polls >= 3  # it actually waited on the backlog
+
+
+class _SlowTinyChunkClient(StubMRT2Client):
+    """Generates a tiny chunk slower than its own real-time budget."""
+
+    def generate_chunk(self):
+        import time
+
+        time.sleep(0.01)  # far longer than 10 frames / 48kHz
+        import numpy as np
+
+        return np.zeros((10, 2), dtype=np.float32)
+
+
+async def test_slower_than_realtime_generation_logs_warning(caplog):
+    engine = RT2Engine(_SlowTinyChunkClient(), NullAudioSink(), StubOSCServer())
+    await engine.run(max_chunks=1)
+    assert "slower than real time" in caplog.text
+    assert engine.last_gen_seconds is not None and engine.last_gen_seconds > 0
