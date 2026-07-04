@@ -38,6 +38,8 @@ def test_registers_all_control_handlers():
         "/rt2/cfg/style",
         "/rt2/temperature",
         "/rt2/topk",
+        "/rt2/notes/clear",
+        "/rt2/stop",
     }
 
 
@@ -305,3 +307,30 @@ def test_cfg_style_is_set_and_clamped():
     assert engine._snapshot_conditioning()["cfg_style"] == 5.0
     server.dispatch("/rt2/cfg/style", -99.0)
     assert engine._snapshot_conditioning()["cfg_style"] == -1.0
+
+
+# --- lifecycle / utility channels --------------------------------------------
+
+
+def test_notes_clear_releases_everything():
+    engine, _, _, server = _make_engine()
+    for pitch in (60, 64, 67):
+        server.dispatch("/rt2/note/on", pitch)
+    server.dispatch("/rt2/notes/clear")
+    # Panic wipes held notes AND pending onsets: next chunk is fully masked.
+    assert engine._snapshot_conditioning()["notes"] is None
+
+
+async def test_stop_channel_terminates_run():
+    engine, _, sink, server = _make_engine()
+
+    original_write = sink.write
+
+    def write_then_stop(samples):
+        original_write(samples)
+        server.dispatch("/rt2/stop")  # any OSC surface can stop the engine
+
+    sink.write = write_then_stop
+    final = await asyncio.wait_for(engine.run(), timeout=5)
+    assert final == State.IDLE
+    assert sink.chunks_written == 1

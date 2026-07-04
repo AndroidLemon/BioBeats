@@ -25,6 +25,8 @@
 #   /rt2/cfg/style   f   classifier-free-guidance scale for style  (-1..7)
 #   /rt2/temperature f   sampling temperature (0.1..4.0; unset -> model default)
 #   /rt2/topk        i   sampling top-k       (1..1024;  unset -> model default)
+#   /rt2/notes/clear -   panic: release all held pitches and pending onsets
+#   /rt2/stop        -   clean engine stop after the current chunk
 #
 # Notes use the SPARSE protocol: senders just press/release pitches, and the
 # engine (which owns chunk boundaries) tracks held pitches and expands them into
@@ -135,6 +137,8 @@ class RT2Engine:
         self._server.map("/rt2/cfg/style", self._on_cfg_style)
         self._server.map("/rt2/temperature", self._on_temperature)
         self._server.map("/rt2/topk", self._on_topk)
+        self._server.map("/rt2/notes/clear", self._on_notes_clear)
+        self._server.map("/rt2/stop", self._on_stop)
 
     def _on_prompt(self, address: str, *args) -> None:
         """/rt2/prompt <string> — set the style prompt for the next chunk."""
@@ -208,6 +212,18 @@ class RT2Engine:
                 self._cfg_drums = scale
             else:
                 self._cfg_style = scale
+
+    def _on_notes_clear(self, address: str, *args) -> None:
+        """/rt2/notes/clear — panic: release all held pitches and pending onsets."""
+        with self._lock:
+            self._held.clear()
+            self._onsets.clear()
+        logger.info("OSC notes/clear: all notes released")
+
+    def _on_stop(self, address: str, *args) -> None:
+        """/rt2/stop — request a clean engine stop after the current chunk."""
+        logger.info("OSC stop requested")
+        self.stop()
 
     def _on_temperature(self, address: str, *args) -> None:
         """/rt2/temperature <float> — sampling temperature, clamped 0.1..4.0.
