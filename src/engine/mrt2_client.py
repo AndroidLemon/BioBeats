@@ -63,6 +63,10 @@ CHANNELS = 2
 FRAMES_PER_SECOND = 25  # RT2: 25 generation frames == 1 second
 CHUNK_SECONDS = 2.0
 CHUNK_FRAMES = int(FRAMES_PER_SECOND * CHUNK_SECONDS)  # 50 frames -> 2s
+# Style embeddings are cached per prompt so returning to a recent prompt (e.g.
+# HR oscillating across a zone boundary every reading) costs a dict lookup, not
+# an embed that steals time from the generation budget. Bounded FIFO eviction.
+EMBED_CACHE_MAX = 32
 
 
 class MRT2Client:
@@ -96,6 +100,7 @@ class MRT2Client:
         self._mrt, self._style = self._executor.submit(
             self._load_backend, size, default_prompt
         ).result()
+        self._style_cache: dict[str, object] = {default_prompt: self._style}
 
     @staticmethod
     def _load_backend(size: str, default_prompt: str):
@@ -116,11 +121,22 @@ class MRT2Client:
         prompt = conditioning["prompt"]
         if prompt != self._prompt:
             self._prompt = prompt
-            self._style = self._executor.submit(self._mrt.embed_style, prompt).result()
+            self._style = self._embed_cached(prompt)
         self._notes = conditioning.get("notes")
         self._drums = conditioning.get("drums")
         self._cfg_notes = conditioning.get("cfg_notes")
         self._cfg_drums = conditioning.get("cfg_drums")
+
+    def _embed_cached(self, prompt: str):
+        """Return the style embedding for `prompt`, embedding once per prompt."""
+        style = self._style_cache.get(prompt)
+        if style is None:
+            style = self._executor.submit(self._mrt.embed_style, prompt).result()
+            if len(self._style_cache) >= EMBED_CACHE_MAX:
+                # FIFO eviction: drop the oldest entry (dicts preserve order).
+                self._style_cache.pop(next(iter(self._style_cache)))
+            self._style_cache[prompt] = style
+        return style
 
     def generate_chunk(self) -> np.ndarray:
         """Generate one 2s chunk, threading the streaming state forward."""

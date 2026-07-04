@@ -134,3 +134,29 @@ def test_conditioning_without_note_keys_defaults_to_masked(monkeypatch):
     assert kwargs["drums"] is None
     assert kwargs["cfg_notes"] is None
     assert kwargs["cfg_drums"] is None
+
+
+def test_returning_to_a_seen_prompt_uses_the_embed_cache(monkeypatch):
+    # HR flapping across a zone boundary alternates between two prompts every
+    # reading; each re-embed steals time from the generation budget. Seen
+    # prompts must come from the cache, not a fresh embed.
+    _inject_fake_backend(monkeypatch)
+    from src.engine.mrt2_client import MRT2Client
+
+    client = MRT2Client(default_prompt="ambient")
+    backend = client._mrt
+    client.update_conditioning({"prompt": "driving pulse"})
+    client.update_conditioning({"prompt": "ambient"})
+    client.update_conditioning({"prompt": "driving pulse"})
+    client.update_conditioning({"prompt": "ambient"})
+    assert backend.embed_calls == ["ambient", "driving pulse"]  # one each
+
+
+def test_embed_cache_is_bounded(monkeypatch):
+    _inject_fake_backend(monkeypatch)
+    from src.engine.mrt2_client import EMBED_CACHE_MAX, MRT2Client
+
+    client = MRT2Client(default_prompt="p0")
+    for i in range(EMBED_CACHE_MAX + 10):
+        client.update_conditioning({"prompt": f"p{i}"})
+    assert len(client._style_cache) <= EMBED_CACHE_MAX
