@@ -2,9 +2,10 @@
 
 ## Project
 An instrument host around Magenta RT2. ONE engine owns the model + generate loop;
-many control surfaces steer it over the `/rt2/*` OSC contract. Heart rate is the
-flagship source, not a special case — it's an adapter, a peer of MIDI and any
-external OSC tool. Each module is independently replaceable with a stub.
+many control surfaces steer it over the `/rt2/*` OSC contract and observe it over
+`/rt2/status`. Surfaces are peers: the GUI command center, MIDI, heart rate (the
+original use case), any external OSC tool. Each module is independently
+replaceable with a stub.
 
 Architecture: `source → mapping → OSC (/rt2/*) → RT2 engine → audio`.
 - Engine (`src/engine/`): owns the single MRT2 client + sink + the only generate
@@ -15,31 +16,41 @@ Architecture: `source → mapping → OSC (/rt2/*) → RT2 engine → audio`.
 - Sources (`src/ble/`, `src/midi/`) + mappings (`src/mapping/`, pure): the
   tunable creative core.
 
-`/rt2/*` channels: prompt, intensity, note/on, note/off, drum, cfg/notes,
-cfg/drums. Notes are SPARSE — senders press/release pitches; the engine tracks
-held pitches and expands them to RT2's 128-int vector per chunk (onset 2 / held 1
-/ off 0 / masked None). Style+intensity are latest-wins; the engine snapshots all
-conditioning each chunk.
+`/rt2/*` channels: prompt, intensity, note/on, note/off, notes/clear, drum,
+cfg/notes, cfg/drums, cfg/style, temperature, topk, stop. Outbound: /rt2/status
+(JSON per chunk when a status sender is configured). Intensity maps to sampling
+temperature (1.0..1.6) unless /rt2/temperature overrides it. Notes are SPARSE —
+senders press/release pitches; the engine tracks held pitches and expands them to
+RT2's 128-int vector per chunk (onset 2 / held 1 / off 0 / masked None). Scalars
+are latest-wins; the engine snapshots all conditioning each chunk and paces
+generation against sink.buffered_frames() so latency stays bounded.
 
 ## FSM States (engine lifecycle)
-IDLE → CONNECTING → STREAMING → GENERATING → ERROR → IDLE
+IDLE → CONNECTING → STREAMING → GENERATING → STREAMING → (STOP) → IDLE
+(any state) → ERROR → IDLE (bounded retries; dead OSC server skips them).
 Pure core in `src/engine/fsm.py` (State/Event/next_state); driven by RT2Engine.
-One state at a time. No cross-state side effects.
+One state at a time; every exit settles in IDLE. No cross-state side effects.
 
 ## Modules
-- src/engine/mrt2_client.py — MRT2 wrapper; 48kHz stereo chunks (single MLX thread)
+- src/engine/mrt2_client.py — MRT2 wrapper; 48kHz stereo chunks (single MLX
+  thread); per-prompt embed cache
 - src/engine/fsm.py — pure State/Event/next_state lifecycle core
-- src/engine/rt2_engine.py — RT2Engine: owns model+sink, FSM generate loop, OSC surface
-- src/output/audio_sink.py — playback buffering
+- src/engine/rt2_engine.py — RT2Engine: owns model+sink, FSM loop, OSC surface,
+  playback pacing, latency timing, /rt2/status publisher
+- src/output/audio_sink.py — playback buffering; buffered_frames()/underruns()
+- src/output/recording_audio_sink.py — AudioSinkProtocol decorator → WAV tee
+- src/gui/command_center.py — browser control surface: HTTP → OSC + status cache
 - src/ble/hr_monitor.py — BLE via bleak; emits HR int via asyncio.Queue
 - src/midi/midi_source.py — MIDI input via mido/rtmidi
-- src/mapping/hr_to_prompt.py — pure fn: HR int → conditioning dict
+- src/mapping/hr_to_prompt.py — pure fn: HR int → conditioning dict (hysteresis)
 - src/mapping/midi_to_conditioning.py — pure fn: MIDI message → OSC pairs
 - src/integrations/osc_server.py — engine inbound OSC control surface
 - src/integrations/osc_client.py — loopback OSC sender (adapters use this)
 - src/integrations/fanout_osc_sender.py — fan one OSC stream to several senders
 - src/integrations/biometric_bridge.py — HR → OSC adapter (latest-wins)
 - src/integrations/midi_bridge.py — MIDI → OSC adapter (every message)
+- src/integrations/control_log.py — OSCSenderProtocol decorator → JSONL log
+- src/diagnostics/doctor.py — per-layer preflight checks for the real rig
 - stubs/ — deterministic drop-ins matching real module interfaces exactly
 
 ## Engine: STRICTLY Magenta RT2
