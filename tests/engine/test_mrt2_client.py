@@ -218,3 +218,43 @@ def test_topk_and_style_cfg_threaded_into_generate(monkeypatch):
     kwargs = client._mrt.last_generate_kwargs
     assert kwargs["top_k"] == 12
     assert kwargs["cfg_musiccoca"] == 5.0
+
+
+def test_all_mlx_touchpoints_run_on_one_dedicated_thread(monkeypatch):
+    # MLX binds its GPU stream to the thread that built the model; calling from
+    # another thread crashes. The executor exists solely to guarantee this —
+    # protect it: construction, embedding, and generation must share one
+    # thread, and it must not be the caller's.
+    import threading
+
+    _inject_fake_backend(monkeypatch)
+    import sys
+
+    threads = []
+    system_cls = sys.modules["magenta_rt.mlx.system"].MagentaRT2SystemMlxfn
+
+    class _ThreadRecordingSystem(system_cls):
+        def __init__(self, *args, **kwargs):
+            threads.append(threading.get_ident())
+            super().__init__(*args, **kwargs)
+
+        def embed_style(self, *args, **kwargs):
+            threads.append(threading.get_ident())
+            return super().embed_style(*args, **kwargs)
+
+        def generate(self, *args, **kwargs):
+            threads.append(threading.get_ident())
+            return super().generate(*args, **kwargs)
+
+    sys.modules["magenta_rt.mlx.system"].MagentaRT2SystemMlxfn = (
+        _ThreadRecordingSystem
+    )
+    from src.engine.mrt2_client import MRT2Client
+
+    client = MRT2Client(default_prompt="a")
+    client.update_conditioning({"prompt": "b"})  # embed
+    client.generate_chunk()
+
+    assert len(threads) >= 3  # construct + embed + generate
+    assert len(set(threads)) == 1
+    assert threads[0] != threading.get_ident()

@@ -128,3 +128,19 @@ async def test_zone_hysteresis_threads_across_readings():
     prompts = [v for a, v in sender.sent if a == "/rt2/prompt"]
     push_prompt = hr_to_conditioning(125, 185)["prompt"]
     assert prompts == [push_prompt, push_prompt]
+
+
+class _ExplodingHRMonitor:
+    """Yields one reading, then dies — a dropped BLE connection."""
+
+    async def stream_hr(self, queue, interval=1.0):
+        await queue.put(100)
+        raise OSError("BLE connection lost")
+
+
+async def test_source_failure_terminates_run_and_is_logged(caplog):
+    sender = StubOSCClient()
+    bridge = BiometricBridge(_ExplodingHRMonitor(), sender)
+    forwarded = await asyncio.wait_for(bridge.run(), timeout=5)
+    assert forwarded == 2  # the reading before the failure was forwarded
+    assert "HR source failed" in caplog.text

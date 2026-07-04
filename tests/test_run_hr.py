@@ -57,3 +57,31 @@ def test_record_flag_writes_control_log(tmp_path):
     assert main(["--stub", "--record", str(log)]) == 2
     events = read_control_log(log)
     assert [e.address for e in events] == ["/rt2/prompt", "/rt2/intensity"]
+
+
+def test_visuals_flags_wire_a_fanout_sender():
+    from src.integrations.fanout_osc_sender import FanoutOSCSender
+
+    bridge = build_bridge(
+        parse_args(["--visuals-host", "127.0.0.1", "--visuals-port", "9000"])
+    )
+    assert isinstance(bridge._sender, FanoutOSCSender)
+
+
+def test_record_wraps_outermost_over_fanout(tmp_path):
+    from src.integrations.control_log import RecordingOSCSender
+    from src.integrations.fanout_osc_sender import FanoutOSCSender
+
+    log = tmp_path / "take.jsonl"
+    bridge = build_bridge(
+        parse_args(
+            [
+                "--record", str(log),
+                "--visuals-host", "127.0.0.1",
+                "--visuals-port", "9000",
+            ]
+        )
+    )
+    # The log must capture exactly what goes out, including to the fanout.
+    assert isinstance(bridge._sender, RecordingOSCSender)
+    assert isinstance(bridge._sender._inner, FanoutOSCSender)

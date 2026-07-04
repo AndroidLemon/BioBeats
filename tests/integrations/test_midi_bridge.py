@@ -121,3 +121,21 @@ async def test_stop_before_run_is_honored():
     forwarded = await asyncio.wait_for(bridge.run(), timeout=5)
     assert forwarded == 0
     assert sender.sent == []
+
+
+class _ExplodingMIDISource:
+    """Yields one message, then dies — an unplugged controller."""
+
+    async def stream_messages(self, queue, interval=1.0):
+        await queue.put(
+            SimpleNamespace(type="note_on", note=60, velocity=100, channel=0)
+        )
+        raise OSError("MIDI port gone")
+
+
+async def test_source_failure_terminates_run_and_is_logged(caplog):
+    sender = StubOSCClient()
+    bridge = MIDIBridge(_ExplodingMIDISource(), sender)
+    forwarded = await asyncio.wait_for(bridge.run(), timeout=5)
+    assert forwarded == 2  # note/on + intensity from the message before death
+    assert "MIDI source failed" in caplog.text

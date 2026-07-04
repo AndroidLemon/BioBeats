@@ -389,3 +389,19 @@ async def test_no_status_sender_publishes_nothing():
     final = await engine.run(max_chunks=1)
     assert final == State.IDLE
     assert sink.chunks_written == 1
+
+
+async def test_conditioning_change_mid_run_reaches_the_next_chunk():
+    engine, mrt, sink, server = _make_engine(default_prompt="first")
+
+    original_write = sink.write
+
+    def write_and_redirect(samples):
+        original_write(samples)
+        if sink.chunks_written == 1:  # between chunk 1 and chunk 2
+            server.dispatch("/rt2/prompt", "second")
+
+    sink.write = write_and_redirect
+    await engine.run(max_chunks=2)
+    # Chunk 2's snapshot picked up the mid-run change (latest-wins per chunk).
+    assert mrt.conditioning["prompt"] == "second"
