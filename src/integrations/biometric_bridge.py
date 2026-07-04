@@ -93,7 +93,8 @@ class BiometricBridge:
     async def run(self, max_updates: int | None = None) -> int:
         """Stream and forward HR-translated OSC messages. Returns the count sent."""
         queue: asyncio.Queue = asyncio.Queue()
-        self._stop_event = asyncio.Event()
+        # Deliberately NOT recreated here: a stop() issued before run() (e.g.
+        # by a supervisor) must terminate this run immediately, not be lost.
         source_task = asyncio.create_task(
             self._source.stream_hr(queue, self._interval)
         )

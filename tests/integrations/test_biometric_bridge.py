@@ -92,3 +92,13 @@ async def test_max_updates_bounds_the_loop():
     forwarded = await bridge.run(max_updates=1)
     assert forwarded == 2
     assert len(sender.sent) == 2
+
+
+async def test_stop_before_run_is_honored():
+    # A supervisor may stop() before (or between) runs; that request must not
+    # be lost when run() starts.
+    bridge, sender = _make_bridge([100, 120, 140])
+    bridge.stop()
+    forwarded = await asyncio.wait_for(bridge.run(), timeout=5)
+    assert forwarded == 0
+    assert sender.sent == []
