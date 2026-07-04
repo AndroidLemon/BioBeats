@@ -13,6 +13,7 @@
 import argparse
 import asyncio
 import logging
+import time
 
 from src.integrations.control_log import read_control_log
 from src.integrations.osc_server import DEFAULT_HOST, DEFAULT_PORT
@@ -38,21 +39,30 @@ def parse_args(argv=None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-async def replay_events(events, sender, *, speed: float = 1.0, sleep=asyncio.sleep) -> int:
-    """Re-emit events over `sender`, preserving inter-event timing / `speed`.
+async def replay_events(
+    events,
+    sender,
+    *,
+    speed: float = 1.0,
+    sleep=asyncio.sleep,
+    clock=time.monotonic,
+) -> int:
+    """Re-emit events over `sender`, preserving the take's timing / `speed`.
 
-    Waits the (scaled) gap between consecutive timestamps, then sends. `sleep` is
-    injectable so tests can run instantly. Returns the number of events sent.
+    Each event targets its ABSOLUTE (scaled) timestamp against `clock`, so
+    scheduler overshoot on one sleep is absorbed by the next wait instead of
+    accumulating across a long take (per-gap sleeping lags seconds by the end
+    of a 10-minute session). `sleep` and `clock` are injectable so tests run
+    instantly and deterministically. Returns the number of events sent.
     """
     if speed <= 0:
         raise ValueError(f"speed must be positive, got {speed}")
-    prev_t = 0.0
+    start = clock()
     for event in events:
-        gap = (event.t - prev_t) / speed
-        if gap > 0:
-            await sleep(gap)
+        wait = start + event.t / speed - clock()
+        if wait > 0:
+            await sleep(wait)
         sender.send(event.address, event.value)
-        prev_t = event.t
     return len(events)
 
 
