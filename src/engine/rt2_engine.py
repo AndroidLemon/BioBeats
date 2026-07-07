@@ -358,7 +358,9 @@ class RT2Engine:
             ):
                 await asyncio.sleep(PACE_POLL_SECONDS)
                 continue
-            self._mrt.update_conditioning(self._snapshot_conditioning())
+            await asyncio.to_thread(
+                self._mrt.update_conditioning, self._snapshot_conditioning()
+            )
             state = next_state(state, Event.TICK)  # -> GENERATING
             # The model call blocks (MLX); keep the event loop responsive.
             started = time.monotonic()

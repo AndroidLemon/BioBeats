@@ -71,7 +71,7 @@ class CommandCenter:
         self._sender = sender
         self._lock = threading.Lock()
         self._status: dict | None = None
-        self._status_at: float | None = None
+        self._status_at: float = 0.0
 
     def send(self, address: str, value) -> None:
         """Forward one validated control message to the engine."""
