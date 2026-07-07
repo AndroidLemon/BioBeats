@@ -116,13 +116,38 @@ def test_hardware_checks_return_valid_results_without_hardware():
         assert result.status in CheckStatus
 
 
-def test_check_ble_smoke(monkeypatch):
-    # Avoid a real 0.1s+ BLE scan: stub bleak so the check exercises its own
-    # logic path deterministically. If bleak isn't importable it SKIPs, which is
-    # also a valid outcome we accept here.
+class _FakeDevice:
+    def __init__(self, name, address="AA:BB"):
+        self.name = name
+        self.address = address
+
+
+def _fake_bleak(monkeypatch, devices):
+    import sys
+    import types
+
+    fake = types.ModuleType("bleak")
+
+    class _Scanner:
+        @staticmethod
+        async def discover(timeout=None):
+            return devices
+
+    fake.BleakScanner = _Scanner
+    monkeypatch.setitem(sys.modules, "bleak", fake)
+
+
+def test_check_ble_no_monitor_in_range_warns(monkeypatch):
+    _fake_bleak(monkeypatch, [_FakeDevice("SomeSpeaker")])
     result = check_ble(DoctorConfig(scan_seconds=0.01))
-    assert isinstance(result, CheckResult)
-    assert result.status in CheckStatus
+    assert result.status is CheckStatus.WARN
+
+
+def test_check_ble_finds_monitor_by_prefix(monkeypatch):
+    _fake_bleak(monkeypatch, [_FakeDevice("OTbeat Burn 123")])
+    result = check_ble(DoctorConfig(scan_seconds=0.01))
+    assert result.status is CheckStatus.PASS
+    assert "OTbeat Burn 123" in result.detail
 
 
 # --- Doctor runner ---------------------------------------------------------
@@ -143,3 +168,101 @@ def test_doctor_catches_a_crashing_check(monkeypatch):
     results = Doctor(DoctorConfig()).run(["env"])
     assert results[0].status is CheckStatus.FAIL
     assert "kaboom" in results[0].detail
+
+
+# --- rt2-model / audio branch behavior (fake backends, same technique as
+# --- the audio-sink and MRT2 client tests) ----------------------------------
+
+
+def _fake_magenta_paths(monkeypatch, models_dir):
+    import sys
+    import types
+
+    fake_pkg = types.ModuleType("magenta_rt")
+    fake_paths = types.ModuleType("magenta_rt.paths")
+    fake_paths.models_dir = lambda: models_dir
+    fake_pkg.paths = fake_paths
+    monkeypatch.setitem(sys.modules, "magenta_rt", fake_pkg)
+    monkeypatch.setitem(sys.modules, "magenta_rt.paths", fake_paths)
+
+
+def test_rt2_missing_package_fails_on_engine_host(monkeypatch):
+    import builtins
+    import sys
+
+    from src.diagnostics import doctor
+
+    monkeypatch.delitem(sys.modules, "magenta_rt", raising=False)
+    monkeypatch.delitem(sys.modules, "magenta_rt.paths", raising=False)
+    real_import = builtins.__import__
+
+    def _no_magenta(name, *args, **kwargs):
+        if name.startswith("magenta_rt"):
+            raise ImportError("nope")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", _no_magenta)
+    # On the engine host a missing engine stack is broken, not informational.
+    monkeypatch.setattr(doctor, "_is_engine_host", lambda: True)
+    assert check_rt2_model(DoctorConfig()).status is CheckStatus.FAIL
+    monkeypatch.setattr(doctor, "_is_engine_host", lambda: False)
+    assert check_rt2_model(DoctorConfig()).status is CheckStatus.SKIP
+
+
+def test_rt2_weights_missing_warns_with_real_download_hint(monkeypatch, tmp_path):
+    _fake_magenta_paths(monkeypatch, tmp_path)
+    result = check_rt2_model(DoctorConfig(model_size="mrt2_small"))
+    assert result.status is CheckStatus.WARN
+    # `--load-model` does NOT download; the package's own CLI does.
+    assert "mrt models download" in result.hint
+
+
+def test_rt2_empty_model_dir_is_not_weights_present(monkeypatch, tmp_path):
+    _fake_magenta_paths(monkeypatch, tmp_path)
+    (tmp_path / "mrt2_small").mkdir()  # exists but empty (aborted download)
+    result = check_rt2_model(DoctorConfig(model_size="mrt2_small"))
+    assert result.status is CheckStatus.WARN
+
+
+def test_rt2_model_files_present_passes(monkeypatch, tmp_path):
+    _fake_magenta_paths(monkeypatch, tmp_path)
+    model_dir = tmp_path / "mrt2_small"
+    model_dir.mkdir()
+    (model_dir / "graph.mlxfn").touch()
+    (model_dir / "graph_state.safetensors").touch()
+    result = check_rt2_model(DoctorConfig(model_size="mrt2_small"))
+    assert result.status is CheckStatus.PASS
+
+
+def test_slower_than_realtime_budget_warns():
+    from src.diagnostics.doctor import classify_budget
+
+    status, label = classify_budget(1.2, chunk_seconds=2.0)
+    assert status is CheckStatus.PASS and "OK" in label
+    status, label = classify_budget(2.4, chunk_seconds=2.0)
+    assert status is CheckStatus.WARN and "SLOWER" in label
+
+
+def test_osc_port_fail_hint_mentions_running_engine():
+    import socket as socket_mod
+
+    sock = socket_mod.socket(socket_mod.AF_INET, socket_mod.SOCK_DGRAM)
+    sock.bind(("127.0.0.1", 0))
+    port = sock.getsockname()[1]
+    try:
+        result = check_osc_port(DoctorConfig(osc_port=port))
+        assert result.status is CheckStatus.FAIL
+        assert "engine" in result.hint  # might just be the engine, mid-session
+    finally:
+        sock.close()
+
+
+def test_rt2_graph_without_state_file_is_not_weights_present(monkeypatch, tmp_path):
+    # A partial download (graph exported, state weights missing) must WARN,
+    # not PASS — the model can't load without both artifacts.
+    _fake_magenta_paths(monkeypatch, tmp_path)
+    model_dir = tmp_path / "mrt2_small"
+    model_dir.mkdir()
+    (model_dir / "graph.mlxfn").touch()
+    result = check_rt2_model(DoctorConfig(model_size="mrt2_small"))
+    assert result.status is CheckStatus.WARN

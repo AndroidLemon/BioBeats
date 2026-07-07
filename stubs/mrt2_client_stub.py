@@ -18,7 +18,7 @@ class StubMRT2Client:
     """Deterministic MRT2 stand-in. Accepts conditioning, returns silence.
 
     Holds the most recent conditioning dict (like the real client holds its
-    style embedding) so tests can assert the pipeline pushed conditioning,
+    style embedding) so tests can assert the engine pushed conditioning,
     but the audio output is always zeros.
     """
 

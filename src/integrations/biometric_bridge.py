@@ -1,7 +1,7 @@
 # Biometric -> OSC bridge: forwards heart rate as RT2 control messages.
 #
-# The project's original soul (HR -> generative music), refactored into the same
-# shape as every other control surface: a BLE heart-rate monitor is now "just
+# The project's original use case (HR -> generative music), refactored into the
+# same shape as every other control surface: a BLE heart-rate monitor is "just
 # another OSC client" feeding the same /rt2/prompt and /rt2/intensity addresses
 # RT2Engine listens on (loopback UDP). It owns one HRMonitorProtocol + one
 # OSCSenderProtocol and depends on neither the engine internals nor a concrete
@@ -93,18 +93,23 @@ class BiometricBridge:
     async def run(self, max_updates: int | None = None) -> int:
         """Stream and forward HR-translated OSC messages. Returns the count sent."""
         queue: asyncio.Queue = asyncio.Queue()
-        self._stop_event = asyncio.Event()
+        # Deliberately NOT recreated here: a stop() issued before run() (e.g.
+        # by a supervisor) must terminate this run immediately, not be lost.
         source_task = asyncio.create_task(
             self._source.stream_hr(queue, self._interval)
         )
         forwarded = 0
         readings = 0
+        zone: str | None = None
         try:
             while not self._stop_event.is_set():
                 hr = await _latest_hr(queue, source_task, self._stop_event)
                 if hr is None:
                     break
-                conditioning = hr_to_conditioning(hr, self._hr_max)
+                conditioning = hr_to_conditioning(
+                    hr, self._hr_max, previous_zone=zone
+                )
+                zone = conditioning["zone"]
                 self._sender.send("/rt2/prompt", conditioning["prompt"])
                 self._sender.send("/rt2/intensity", conditioning["intensity"])
                 forwarded += 2

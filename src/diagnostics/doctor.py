@@ -171,7 +171,10 @@ def check_osc_port(config: DoctorConfig) -> CheckResult:
             name,
             CheckStatus.FAIL,
             f"{detail} — {exc.strerror or exc}",
-            hint="another process holds the port; stop it or pass --port a free one",
+            hint=(
+                "another process holds the port — possibly a running engine "
+                "(fine mid-session); otherwise stop it or pass --port a free one"
+            ),
         )
     finally:
         sock.close()
@@ -268,6 +271,17 @@ def check_ble(config: DoctorConfig) -> CheckResult:
     )
 
 
+def classify_budget(elapsed: float, chunk_seconds: float = 2.0) -> tuple:
+    """Classify a steady-state chunk time against its real-time budget.
+
+    Pure so it's directly testable: at or over budget the rig will underrun
+    constantly, which must surface as WARN — never a green PASS.
+    """
+    if elapsed < chunk_seconds:
+        return CheckStatus.PASS, "real-time OK"
+    return CheckStatus.WARN, "SLOWER THAN REAL TIME"
+
+
 def check_rt2_model(config: DoctorConfig) -> CheckResult:
     """Is the RT2/MLX stack importable, are weights present, and (opt-in) can it
     actually generate a chunk? STRICTLY RT2 — uses the MLX backend only."""
@@ -275,12 +289,22 @@ def check_rt2_model(config: DoctorConfig) -> CheckResult:
     try:
         from magenta_rt import paths
     except Exception as exc:  # noqa: BLE001
+        # On the engine host a missing engine stack is a genuine failure (the
+        # rig can't run); elsewhere only adapters run, so it's informational.
+        status = CheckStatus.FAIL if _is_engine_host() else CheckStatus.SKIP
         return CheckResult(
-            name, CheckStatus.SKIP, f"magenta-rt unavailable: {exc}", hint="`uv sync`"
+            name, status, f"magenta-rt unavailable: {exc}", hint="`uv sync`"
         )
 
     model_dir = paths.models_dir() / config.model_size
-    weights_present = model_dir.exists()
+    # An existing-but-empty or partial directory (aborted download) is not
+    # "present": require BOTH artifacts `mrt models download` produces — the
+    # exported graph (.mlxfn) and its weights (_state.safetensors).
+    weights_present = (
+        model_dir.is_dir()
+        and any(model_dir.glob("*.mlxfn"))
+        and any(model_dir.glob("*.safetensors"))
+    )
 
     if not config.load_model:
         if weights_present:
@@ -291,7 +315,7 @@ def check_rt2_model(config: DoctorConfig) -> CheckResult:
             name,
             CheckStatus.WARN,
             f"weights not found at {model_dir}",
-            hint="run once with --load-model to download, or pre-fetch the model",
+            hint=f"fetch them with `mrt models download {config.model_size}`",
         )
 
     # Opt-in heavy path: actually construct the MLX system and generate a chunk.
@@ -318,9 +342,12 @@ def check_rt2_model(config: DoctorConfig) -> CheckResult:
             hint="RT2 requires an Apple-Silicon Mac (MLX); check the model download",
         )
     # CHUNK_FRAMES is 2s of audio: a steady-state chunk over ~2s can't keep up.
-    budget = "real-time OK" if elapsed < 2.0 else "SLOWER THAN REAL TIME"
+    status, budget = classify_budget(elapsed)
+    hint = None
+    if status is not CheckStatus.PASS:
+        hint = "the rig will underrun constantly; try --size mrt2_small"
     return CheckResult(
-        name, CheckStatus.PASS, f"steady-state chunk in {elapsed:.1f}s ({budget})"
+        name, status, f"steady-state chunk in {elapsed:.1f}s ({budget})", hint=hint
     )
 
 

@@ -35,6 +35,11 @@ def test_registers_all_control_handlers():
         "/rt2/drum",
         "/rt2/cfg/notes",
         "/rt2/cfg/drums",
+        "/rt2/cfg/style",
+        "/rt2/temperature",
+        "/rt2/topk",
+        "/rt2/notes/clear",
+        "/rt2/stop",
     }
 
 
@@ -142,17 +147,33 @@ def test_malformed_messages_do_not_raise():
 # --- run loop --------------------------------------------------------------
 
 
-async def test_run_streams_chunks_and_applies_conditioning():
+async def test_run_streams_chunks_and_settles_idle():
     engine, mrt, sink, server = _make_engine()
     server.dispatch("/rt2/prompt", "ambient drone")
     server.dispatch("/rt2/note/on", 60)
     final = await engine.run(max_chunks=2)
-    assert final == State.STREAMING
+    assert final == State.IDLE  # a clean stop settles the FSM
     assert sink.started and sink.stopped
     assert sink.chunks_written == 2
     # The latest snapshot reached the model: prompt + the held note.
     assert mrt.conditioning["prompt"] == "ambient drone"
     assert mrt.conditioning["notes"][60] in (1, 2)
+
+
+async def test_stop_terminates_unbounded_run():
+    engine, _, sink, _ = _make_engine()
+
+    original_write = sink.write
+
+    def write_and_stop(samples):
+        original_write(samples)
+        engine.stop()  # a control surface (or signal handler) pulls the plug
+
+    sink.write = write_and_stop
+    final = await asyncio.wait_for(engine.run(), timeout=5)
+    assert final == State.IDLE
+    assert sink.chunks_written == 1
+    assert sink.stopped is True
 
 
 async def test_run_pushes_default_prompt_without_osc():
@@ -192,9 +213,195 @@ class _DyingOSCServer(StubOSCServer):
         raise RuntimeError("bind failed")
 
 
-async def test_run_stops_and_surfaces_server_thread_failure(caplog):
+async def test_server_death_is_an_error_not_a_clean_stop(caplog):
+    mrt = StubMRT2Client()
     sink = NullAudioSink()
-    engine = RT2Engine(StubMRT2Client(), sink, _DyingOSCServer())
-    await asyncio.wait_for(engine.run(), timeout=5)
+    engine = RT2Engine(mrt, sink, _DyingOSCServer())
+    final = await asyncio.wait_for(engine.run(), timeout=5)
+    # A dead control surface is a failure: the FSM goes through ERROR and
+    # settles in IDLE, and the failure is logged — never a silent STREAMING.
+    assert final == State.IDLE
     assert sink.stopped is True
+    assert "control surface died" in caplog.text
     assert "OSC server thread failed" in caplog.text
+
+
+class _CongestedSink(NullAudioSink):
+    """Sink that reports a deep playback backlog for its first few polls."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.polls = 0
+
+    def buffered_frames(self) -> int:
+        self.polls += 1
+        return 10_000_000 if self.polls < 3 else 0
+
+
+async def test_generation_paces_against_playback_backlog():
+    # With more than TARGET_BUFFER_CHUNKS queued, the engine must wait instead
+    # of generating further ahead (unbounded backlog = unbounded control
+    # latency). The congested sink clears after two polls; both chunks land.
+    mrt = StubMRT2Client()
+    sink = _CongestedSink()
+    engine = RT2Engine(mrt, sink, StubOSCServer())
+    final = await asyncio.wait_for(engine.run(max_chunks=2), timeout=5)
+    assert final == State.IDLE
+    assert sink.chunks_written == 2
+    assert sink.polls >= 3  # it actually waited on the backlog
+
+
+class _SlowTinyChunkClient(StubMRT2Client):
+    """Generates a tiny chunk slower than its own real-time budget."""
+
+    def generate_chunk(self):
+        import time
+
+        time.sleep(0.01)  # far longer than 10 frames / 48kHz
+        import numpy as np
+
+        return np.zeros((10, 2), dtype=np.float32)
+
+
+async def test_slower_than_realtime_generation_logs_warning(caplog):
+    engine = RT2Engine(_SlowTinyChunkClient(), NullAudioSink(), StubOSCServer())
+    await engine.run(max_chunks=1)
+    assert "slower than real time" in caplog.text
+    assert engine.last_gen_seconds is not None and engine.last_gen_seconds > 0
+
+
+# --- sampler knobs (temperature / topk / cfg_style) --------------------------
+
+
+def test_intensity_defaults_to_unset():
+    engine, _, _, _ = _make_engine()
+    assert engine._snapshot_conditioning()["intensity"] is None
+
+
+def test_temperature_is_set_and_clamped():
+    engine, _, _, server = _make_engine()
+    assert engine._snapshot_conditioning()["temperature"] is None
+    server.dispatch("/rt2/temperature", 1.1)
+    assert engine._snapshot_conditioning()["temperature"] == 1.1
+    server.dispatch("/rt2/temperature", 99.0)
+    assert engine._snapshot_conditioning()["temperature"] == 4.0
+    server.dispatch("/rt2/temperature", 0.0)
+    assert engine._snapshot_conditioning()["temperature"] == 0.1
+
+
+def test_topk_requires_int_and_is_clamped():
+    engine, _, _, server = _make_engine()
+    server.dispatch("/rt2/topk", 40)
+    assert engine._snapshot_conditioning()["topk"] == 40
+    server.dispatch("/rt2/topk", 40.5)  # non-integer -> ignored
+    assert engine._snapshot_conditioning()["topk"] == 40
+    server.dispatch("/rt2/topk", 0)
+    assert engine._snapshot_conditioning()["topk"] == 1
+    server.dispatch("/rt2/topk", 100000)
+    assert engine._snapshot_conditioning()["topk"] == 1024
+
+
+def test_cfg_style_is_set_and_clamped():
+    engine, _, _, server = _make_engine()
+    server.dispatch("/rt2/cfg/style", 5.0)
+    assert engine._snapshot_conditioning()["cfg_style"] == 5.0
+    server.dispatch("/rt2/cfg/style", -99.0)
+    assert engine._snapshot_conditioning()["cfg_style"] == -1.0
+
+
+# --- lifecycle / utility channels --------------------------------------------
+
+
+def test_notes_clear_releases_everything():
+    engine, _, _, server = _make_engine()
+    for pitch in (60, 64, 67):
+        server.dispatch("/rt2/note/on", pitch)
+    server.dispatch("/rt2/notes/clear")
+    # Panic wipes held notes AND pending onsets: next chunk is fully masked.
+    assert engine._snapshot_conditioning()["notes"] is None
+
+
+async def test_stop_channel_terminates_run():
+    engine, _, sink, server = _make_engine()
+
+    original_write = sink.write
+
+    def write_then_stop(samples):
+        original_write(samples)
+        server.dispatch("/rt2/stop")  # any OSC surface can stop the engine
+
+    sink.write = write_then_stop
+    final = await asyncio.wait_for(engine.run(), timeout=5)
+    assert final == State.IDLE
+    assert sink.chunks_written == 1
+
+
+# --- status feedback ---------------------------------------------------------
+
+
+def _status_messages(sender):
+    import json
+
+    return [json.loads(v) for a, v in sender.sent if a == "/rt2/status"]
+
+
+async def test_status_published_per_chunk_and_on_exit():
+    from stubs.osc_client_stub import StubOSCClient
+
+    status = StubOSCClient()
+    mrt = StubMRT2Client()
+    sink = NullAudioSink()
+    server = StubOSCServer()
+    engine = RT2Engine(mrt, sink, server, status_sender=status)
+    server.dispatch("/rt2/prompt", "deep dub")
+    server.dispatch("/rt2/note/on", 60)
+    await engine.run(max_chunks=2)
+
+    messages = _status_messages(status)
+    assert len(messages) == 3  # one per chunk + terminal
+    first, last = messages[0], messages[-1]
+    assert first["state"] == "STREAMING"
+    assert first["chunk"] == 1
+    assert first["prompt"] == "deep dub"
+    assert first["held_notes"] == 1
+    assert first["gen_seconds"] >= 0
+    assert first["chunk_seconds"] > 0
+    assert first["buffered_frames"] == 0
+    assert first["underruns"] == 0
+    assert last["state"] == "IDLE"
+    assert last["chunk"] == 2
+
+
+async def test_broken_status_sender_does_not_kill_generation(caplog):
+    class _ExplodingSender:
+        def send(self, address, value):
+            raise OSError("status socket gone")
+
+    engine, _, sink, _ = _make_engine()
+    engine._status = _ExplodingSender()
+    final = await asyncio.wait_for(engine.run(max_chunks=2), timeout=5)
+    assert final == State.IDLE
+    assert sink.chunks_written == 2
+
+
+async def test_no_status_sender_publishes_nothing():
+    engine, _, sink, _ = _make_engine()
+    final = await engine.run(max_chunks=1)
+    assert final == State.IDLE
+    assert sink.chunks_written == 1
+
+
+async def test_conditioning_change_mid_run_reaches_the_next_chunk():
+    engine, mrt, sink, server = _make_engine(default_prompt="first")
+
+    original_write = sink.write
+
+    def write_and_redirect(samples):
+        original_write(samples)
+        if sink.chunks_written == 1:  # between chunk 1 and chunk 2
+            server.dispatch("/rt2/prompt", "second")
+
+    sink.write = write_and_redirect
+    await engine.run(max_chunks=2)
+    # Chunk 2's snapshot picked up the mid-run change (latest-wins per chunk).
+    assert mrt.conditioning["prompt"] == "second"

@@ -134,3 +134,127 @@ def test_conditioning_without_note_keys_defaults_to_masked(monkeypatch):
     assert kwargs["drums"] is None
     assert kwargs["cfg_notes"] is None
     assert kwargs["cfg_drums"] is None
+
+
+def test_returning_to_a_seen_prompt_uses_the_embed_cache(monkeypatch):
+    # HR flapping across a zone boundary alternates between two prompts every
+    # reading; each re-embed steals time from the generation budget. Seen
+    # prompts must come from the cache, not a fresh embed.
+    _inject_fake_backend(monkeypatch)
+    from src.engine.mrt2_client import MRT2Client
+
+    client = MRT2Client(default_prompt="ambient")
+    backend = client._mrt
+    client.update_conditioning({"prompt": "driving pulse"})
+    client.update_conditioning({"prompt": "ambient"})
+    client.update_conditioning({"prompt": "driving pulse"})
+    client.update_conditioning({"prompt": "ambient"})
+    assert backend.embed_calls == ["ambient", "driving pulse"]  # one each
+
+
+def test_embed_cache_is_bounded(monkeypatch):
+    _inject_fake_backend(monkeypatch)
+    from src.engine.mrt2_client import EMBED_CACHE_MAX, MRT2Client
+
+    client = MRT2Client(default_prompt="p0")
+    for i in range(EMBED_CACHE_MAX + 10):
+        client.update_conditioning({"prompt": f"p{i}"})
+    assert len(client._style_cache) <= EMBED_CACHE_MAX
+
+
+def test_intensity_maps_to_temperature_when_no_override(monkeypatch):
+    _inject_fake_backend(monkeypatch)
+    from src.engine.mrt2_client import (
+        INTENSITY_TEMP_MAX,
+        INTENSITY_TEMP_MIN,
+        MRT2Client,
+    )
+
+    client = MRT2Client()
+    client.update_conditioning({"prompt": "ambient", "intensity": 0.0})
+    client.generate_chunk()
+    assert client._mrt.last_generate_kwargs["temperature"] == INTENSITY_TEMP_MIN
+
+    client.update_conditioning({"prompt": "ambient", "intensity": 1.0})
+    client.generate_chunk()
+    assert client._mrt.last_generate_kwargs["temperature"] == INTENSITY_TEMP_MAX
+
+
+def test_explicit_temperature_overrides_intensity(monkeypatch):
+    _inject_fake_backend(monkeypatch)
+    from src.engine.mrt2_client import MRT2Client
+
+    client = MRT2Client()
+    client.update_conditioning(
+        {"prompt": "ambient", "intensity": 1.0, "temperature": 0.7}
+    )
+    client.generate_chunk()
+    assert client._mrt.last_generate_kwargs["temperature"] == 0.7
+
+
+def test_sampler_knobs_default_to_model_defaults(monkeypatch):
+    _inject_fake_backend(monkeypatch)
+    from src.engine.mrt2_client import MRT2Client
+
+    client = MRT2Client()
+    client.update_conditioning({"prompt": "ambient"})
+    client.generate_chunk()
+    kwargs = client._mrt.last_generate_kwargs
+    # No intensity, no overrides: leave every sampler knob to the model.
+    assert kwargs["temperature"] is None
+    assert kwargs["top_k"] is None
+    assert kwargs["cfg_musiccoca"] is None
+
+
+def test_topk_and_style_cfg_threaded_into_generate(monkeypatch):
+    _inject_fake_backend(monkeypatch)
+    from src.engine.mrt2_client import MRT2Client
+
+    client = MRT2Client()
+    client.update_conditioning(
+        {"prompt": "ambient", "topk": 12, "cfg_style": 5.0}
+    )
+    client.generate_chunk()
+    kwargs = client._mrt.last_generate_kwargs
+    assert kwargs["top_k"] == 12
+    assert kwargs["cfg_musiccoca"] == 5.0
+
+
+def test_all_mlx_touchpoints_run_on_one_dedicated_thread(monkeypatch):
+    # MLX binds its GPU stream to the thread that built the model; calling from
+    # another thread crashes. The executor exists solely to guarantee this —
+    # protect it: construction, embedding, and generation must share one
+    # thread, and it must not be the caller's.
+    import threading
+
+    _inject_fake_backend(monkeypatch)
+    import sys
+
+    threads = []
+    system_cls = sys.modules["magenta_rt.mlx.system"].MagentaRT2SystemMlxfn
+
+    class _ThreadRecordingSystem(system_cls):
+        def __init__(self, *args, **kwargs):
+            threads.append(threading.get_ident())
+            super().__init__(*args, **kwargs)
+
+        def embed_style(self, *args, **kwargs):
+            threads.append(threading.get_ident())
+            return super().embed_style(*args, **kwargs)
+
+        def generate(self, *args, **kwargs):
+            threads.append(threading.get_ident())
+            return super().generate(*args, **kwargs)
+
+    sys.modules["magenta_rt.mlx.system"].MagentaRT2SystemMlxfn = (
+        _ThreadRecordingSystem
+    )
+    from src.engine.mrt2_client import MRT2Client
+
+    client = MRT2Client(default_prompt="a")
+    client.update_conditioning({"prompt": "b"})  # embed
+    client.generate_chunk()
+
+    assert len(threads) >= 3  # construct + embed + generate
+    assert len(set(threads)) == 1
+    assert threads[0] != threading.get_ident()

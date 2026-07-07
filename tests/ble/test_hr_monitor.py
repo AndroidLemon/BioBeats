@@ -93,3 +93,41 @@ async def test_stream_hr_drives_notifications_into_queue(monkeypatch):
     readings = [queue.get_nowait() for _ in range(queue.qsize())]
     assert readings == [60, 140]
     assert holder["stopped"] == "00002a37-0000-1000-8000-00805f9b34fb"
+
+
+# --- discovery ---------------------------------------------------------------
+
+
+class _FakeDevice:
+    def __init__(self, name, address):
+        self.name = name
+        self.address = address
+
+
+def _fake_scanner(devices):
+    class _Scanner:
+        @staticmethod
+        async def discover():
+            return devices
+
+    return _Scanner
+
+
+async def test_discover_matches_name_prefix_case_insensitively():
+    monitor = HRMonitor(name_prefix="OTbeat")
+    scanner = _fake_scanner(
+        [
+            _FakeDevice(None, "AA:00"),  # nameless devices must be skipped
+            _FakeDevice("Some Speaker", "AA:01"),
+            _FakeDevice("otbeat burn 42", "AA:02"),
+        ]
+    )
+    assert await monitor._discover(scanner) == "AA:02"
+
+
+async def test_discover_raises_when_no_match():
+    import pytest
+
+    monitor = HRMonitor(name_prefix="OTbeat")
+    with pytest.raises(RuntimeError):
+        await monitor._discover(_fake_scanner([_FakeDevice("Speaker", "AA:01")]))

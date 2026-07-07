@@ -14,13 +14,19 @@
 # in the real OSCServer, so this module imports clean on CI.
 #
 # OSC address space (control-rate; one model + one sink behind it):
-#   /rt2/prompt      s   style prompt (re-embeds only on change)
-#   /rt2/intensity   f   advisory 0..1 intensity carried in the conditioning
+#   /rt2/prompt      s   style prompt (re-embeds only on change, cached)
+#   /rt2/intensity   f   0..1 energy; maps to sampling temperature unless
+#                        /rt2/temperature overrides it explicitly
 #   /rt2/note/on     i   pitch 0-127 pressed (an onset this chunk, then held)
 #   /rt2/note/off    i   pitch 0-127 released
 #   /rt2/drum        i   -1 masked / 0 no-drum / 1 play-drum
 #   /rt2/cfg/notes   f   classifier-free-guidance scale for notes  (-1..7)
 #   /rt2/cfg/drums   f   classifier-free-guidance scale for drums  (-1..7)
+#   /rt2/cfg/style   f   classifier-free-guidance scale for style  (-1..7)
+#   /rt2/temperature f   sampling temperature (0.1..4.0; unset -> model default)
+#   /rt2/topk        i   sampling top-k       (1..1024;  unset -> model default)
+#   /rt2/notes/clear -   panic: release all held pitches and pending onsets
+#   /rt2/stop        -   clean engine stop after the current chunk
 #
 # Notes use the SPARSE protocol: senders just press/release pitches, and the
 # engine (which owns chunk boundaries) tracks held pitches and expands them into
@@ -29,19 +35,31 @@
 # (0). With nothing held, notes are left masked (None) so the model roams.
 
 import asyncio
+import json
 import logging
 import threading
+import time
 
 from src.engine.fsm import Event, State, next_state
 from src.engine.mrt2_client import MRT2ClientProtocol
+from src.integrations.osc_client import OSCSenderProtocol
 from src.integrations.osc_server import OSCServerProtocol
-from src.output.audio_sink import AudioSinkProtocol
+from src.output.audio_sink import SAMPLE_RATE, AudioSinkProtocol
 
 logger = logging.getLogger(__name__)
 
 NUM_PITCHES = 128  # RT2 notes conditioning is one state per MIDI pitch 0-127
 CFG_MIN = -1.0
 CFG_MAX = 7.0
+TEMPERATURE_MIN = 0.1
+TEMPERATURE_MAX = 4.0
+TOPK_MIN = 1
+TOPK_MAX = 1024
+# Pacing: generate until this many chunks are queued for playback, then wait.
+# Enough headroom to absorb a slow chunk; small enough that a control change
+# (note-on, new prompt) is audible within a couple of chunks.
+TARGET_BUFFER_CHUNKS = 2
+PACE_POLL_SECONDS = 0.05
 
 
 def _coerce_int(address: str, args) -> int | None:
@@ -81,11 +99,13 @@ class RT2Engine:
         server: OSCServerProtocol,
         *,
         default_prompt: str = "ambient",
-        default_intensity: float = 0.0,
+        default_intensity: float | None = None,
+        status_sender: OSCSenderProtocol | None = None,
     ) -> None:
         self._mrt = mrt
         self._sink = sink
         self._server = server
+        self._status = status_sender
         self._lock = threading.Lock()
         # Style / intensity conditioning.
         self._prompt = default_prompt
@@ -95,12 +115,18 @@ class RT2Engine:
         self._held: set[int] = set()
         self._onsets: set[int] = set()
         self._drum = -1
-        # Per-channel CFG overrides (None -> the model's own defaults).
+        # Per-channel CFG + sampler overrides (None -> the model's own defaults).
         self._cfg_notes: float | None = None
         self._cfg_drums: float | None = None
+        self._cfg_style: float | None = None
+        self._temperature: float | None = None
+        self._topk: int | None = None
         self._running = False
         self._max_chunks: int | None = None
         self._produced = 0
+        # Latency instrumentation, refreshed per chunk (readable by observers).
+        self.last_gen_seconds: float | None = None
+        self._high_water: int | None = None  # frames; set from the first chunk
         self._register()
 
     def _register(self) -> None:
@@ -112,6 +138,11 @@ class RT2Engine:
         self._server.map("/rt2/drum", self._on_drum)
         self._server.map("/rt2/cfg/notes", self._on_cfg_notes)
         self._server.map("/rt2/cfg/drums", self._on_cfg_drums)
+        self._server.map("/rt2/cfg/style", self._on_cfg_style)
+        self._server.map("/rt2/temperature", self._on_temperature)
+        self._server.map("/rt2/topk", self._on_topk)
+        self._server.map("/rt2/notes/clear", self._on_notes_clear)
+        self._server.map("/rt2/stop", self._on_stop)
 
     def _on_prompt(self, address: str, *args) -> None:
         """/rt2/prompt <string> — set the style prompt for the next chunk."""
@@ -169,21 +200,68 @@ class RT2Engine:
         """/rt2/cfg/drums <float> — drums classifier-free-guidance scale (-1..7)."""
         self._set_cfg(address, args, "drums")
 
+    def _on_cfg_style(self, address: str, *args) -> None:
+        """/rt2/cfg/style <float> — style (MusicCoCa) CFG scale (-1..7)."""
+        self._set_cfg(address, args, "style")
+
     def _set_cfg(self, address: str, args, channel: str) -> None:
-        if not args:
-            logger.warning("ignoring %s: no argument", address)
-            return
-        try:
-            scale = float(args[0])
-        except (TypeError, ValueError):
-            logger.warning("ignoring %s: non-numeric argument %r", address, args[0])
+        scale = self._coerce_float(address, args)
+        if scale is None:
             return
         scale = max(CFG_MIN, min(CFG_MAX, scale))
         with self._lock:
             if channel == "notes":
                 self._cfg_notes = scale
-            else:
+            elif channel == "drums":
                 self._cfg_drums = scale
+            else:
+                self._cfg_style = scale
+
+    def _on_notes_clear(self, address: str, *args) -> None:
+        """/rt2/notes/clear — panic: release all held pitches and pending onsets."""
+        with self._lock:
+            self._held.clear()
+            self._onsets.clear()
+        logger.info("OSC notes/clear: all notes released")
+
+    def _on_stop(self, address: str, *args) -> None:
+        """/rt2/stop — request a clean engine stop after the current chunk."""
+        logger.info("OSC stop requested")
+        self.stop()
+
+    def _on_temperature(self, address: str, *args) -> None:
+        """/rt2/temperature <float> — sampling temperature, clamped 0.1..4.0.
+
+        An explicit temperature wins over the intensity-derived one (see
+        MRT2Client.update_conditioning).
+        """
+        temperature = self._coerce_float(address, args)
+        if temperature is None:
+            return
+        with self._lock:
+            self._temperature = max(
+                TEMPERATURE_MIN, min(TEMPERATURE_MAX, temperature)
+            )
+
+    def _on_topk(self, address: str, *args) -> None:
+        """/rt2/topk <int> — sampling top-k, clamped 1..1024."""
+        topk = _coerce_int(address, args)
+        if topk is None:
+            return
+        with self._lock:
+            self._topk = max(TOPK_MIN, min(TOPK_MAX, topk))
+
+    @staticmethod
+    def _coerce_float(address: str, args) -> float | None:
+        """Parse a single float OSC arg, or None (logged) if missing/non-numeric."""
+        if not args:
+            logger.warning("ignoring %s: no argument", address)
+            return None
+        try:
+            return float(args[0])
+        except (TypeError, ValueError):
+            logger.warning("ignoring %s: non-numeric argument %r", address, args[0])
+            return None
 
     def _snapshot_conditioning(self) -> dict:
         """Build the conditioning for the next chunk and advance note state.
@@ -211,48 +289,121 @@ class RT2Engine:
                 "drums": drums,
                 "cfg_notes": self._cfg_notes,
                 "cfg_drums": self._cfg_drums,
+                "cfg_style": self._cfg_style,
+                "temperature": self._temperature,
+                "topk": self._topk,
             }
 
     def stop(self) -> None:
         """Request the generate loop to stop after the current chunk."""
         self._running = False
 
-    async def _stream_session(self, serve_task: asyncio.Task) -> State:
-        """Run one streaming session, returning its terminal state.
+    def _publish_status(self, state: State) -> None:
+        """Send one /rt2/status JSON blob to the status sender, if configured.
 
-        CONNECTING -> STREAMING, then a chunk per tick until stop(), the OSC
-        server thread exits, or max_chunks is reached. Raises if generation
-        fails — run() catches that to drive the ERROR/recovery cycle.
+        Read-only: unlike _snapshot_conditioning it must NOT advance note
+        state. A failing status sender is logged and ignored — observability
+        must never take the audio down.
+        """
+        if self._status is None:
+            return
+        with self._lock:
+            payload = {
+                "state": state.name,
+                "chunk": self._produced,
+                "gen_seconds": self.last_gen_seconds,
+                "chunk_seconds": (
+                    self._high_water / (TARGET_BUFFER_CHUNKS * SAMPLE_RATE)
+                    if self._high_water is not None
+                    else None
+                ),
+                "prompt": self._prompt,
+                "intensity": self._intensity,
+                "temperature": self._temperature,
+                "topk": self._topk,
+                "cfg_notes": self._cfg_notes,
+                "cfg_drums": self._cfg_drums,
+                "cfg_style": self._cfg_style,
+                "held_notes": len(self._held),
+                "drum": self._drum,
+            }
+        payload["buffered_frames"] = self._sink.buffered_frames()
+        payload["underruns"] = self._sink.underruns()
+        try:
+            self._status.send("/rt2/status", json.dumps(payload))
+        except Exception:
+            logger.warning("status sender failed; continuing", exc_info=True)
+
+    async def _stream_session(self, serve_task: asyncio.Task) -> State:
+        """Run one streaming session, settling to IDLE on a clean stop.
+
+        CONNECTING -> STREAMING, then a chunk per tick until stop() or
+        max_chunks, then STOP -> IDLE. A dead OSC server thread is a failure,
+        not a stop: it raises (as does a generation error), and run() catches
+        that to drive the ERROR/recovery cycle.
         """
         state = next_state(State.IDLE, Event.CONNECT)  # -> CONNECTING
         state = next_state(state, Event.READY)  # -> STREAMING
-        while self._running and not serve_task.done():
+        while self._running:
+            if serve_task.done():
+                raise RuntimeError("OSC control surface died mid-session")
             if self._max_chunks is not None and self._produced >= self._max_chunks:
                 break
-            self._mrt.update_conditioning(self._snapshot_conditioning())
+            # Pace generation against playback: an unbounded backlog means
+            # unbounded control-to-audio latency, so once enough audio is
+            # queued, wait for the sink to drain before generating more.
+            if (
+                self._high_water is not None
+                and self._sink.buffered_frames() >= self._high_water
+            ):
+                await asyncio.sleep(PACE_POLL_SECONDS)
+                continue
+            await asyncio.to_thread(
+                self._mrt.update_conditioning, self._snapshot_conditioning()
+            )
             state = next_state(state, Event.TICK)  # -> GENERATING
             # The model call blocks (MLX); keep the event loop responsive.
+            started = time.monotonic()
             chunk = await asyncio.to_thread(self._mrt.generate_chunk)
+            self.last_gen_seconds = time.monotonic() - started
+            chunk_seconds = chunk.shape[0] / SAMPLE_RATE
+            if self.last_gen_seconds > chunk_seconds:
+                logger.warning(
+                    "chunk %d took %.2fs to generate (> %.2fs budget): "
+                    "model is slower than real time",
+                    self._produced,
+                    self.last_gen_seconds,
+                    chunk_seconds,
+                )
             self._sink.write(chunk)
+            if self._high_water is None:
+                self._high_water = TARGET_BUFFER_CHUNKS * chunk.shape[0]
             self._produced += 1
             state = next_state(state, Event.CHUNK)  # -> STREAMING
-        return state
+            self._publish_status(state)
+        return next_state(state, Event.STOP)  # -> IDLE
 
     async def run(self, max_chunks: int | None = None, max_retries: int = 3) -> State:
         """Serve OSC and stream generated chunks under the FSM. Returns final state.
 
         Starts the sink, runs the blocking OSC server off-thread, then streams
-        chunks (snapshotting the latest conditioning each boundary). On a
-        generation failure the FSM enters ERROR and retries the session up to
-        max_retries times, then surfaces the error and settles in IDLE.
-        `max_chunks` bounds the loop for tests. Always releases the sink and OSC
-        server.
+        chunks (snapshotting the latest conditioning each boundary). A clean
+        stop (stop() or max_chunks) settles to IDLE. On a generation failure
+        the FSM enters ERROR and retries the session up to max_retries times
+        (a dead OSC server skips the retries — they'd be futile), then
+        surfaces the error and settles in IDLE. `max_chunks` bounds the loop
+        for tests. Always releases the sink and OSC server.
         """
         self._sink.start()
         self._running = True
         self._max_chunks = max_chunks
         self._produced = 0
         serve_task = asyncio.create_task(asyncio.to_thread(self._server.serve))
+        # Let the serve task actually start before anything can raise
+        # synchronously: if serve() never runs, socketserver's shutdown() in
+        # the finally below blocks forever (its shutdown event is only set by
+        # a serve loop exiting), freezing the event loop on exit.
+        await asyncio.sleep(0)
         state = State.IDLE
         attempt = 0
         try:
@@ -261,6 +412,10 @@ class RT2Engine:
                     return await self._stream_session(serve_task)
                 except Exception as exc:  # noqa: BLE001 - boundary: any failure -> ERROR
                     state = next_state(state, Event.ERROR)  # -> ERROR
+                    if serve_task.done():
+                        # No control surface, so retrying is futile — settle.
+                        logger.error("engine control surface died: %r", exc)
+                        return next_state(state, Event.RECOVER)  # -> IDLE
                     if attempt >= max_retries:
                         logger.error(
                             "engine failed after %d retries: %r", max_retries, exc
@@ -270,6 +425,7 @@ class RT2Engine:
                     state = next_state(state, Event.RECOVER)  # -> IDLE, retry
         finally:
             self._running = False
+            self._publish_status(State.IDLE)  # terminal state for observers
             self._server.shutdown()
             self._sink.stop()
             # serve() returns once shutdown() lands. Surface (don't swallow) a

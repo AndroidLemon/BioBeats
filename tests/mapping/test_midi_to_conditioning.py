@@ -86,3 +86,16 @@ def test_message_without_channel_defaults_to_melodic():
 def test_pure_function():
     msg = SimpleNamespace(type="note_on", note=70, velocity=100, channel=0)
     assert midi_message_to_osc(msg) == midi_message_to_osc(msg)
+
+
+def test_only_expressive_ccs_map_to_intensity():
+    # A sustain pedal (CC64) or bank select must not slam intensity around;
+    # only deliberate expressive controllers (mod wheel, expression) map.
+    sustain = SimpleNamespace(type="control_change", control=64, value=127, channel=0)
+    assert midi_message_to_osc(sustain) == []
+    bank = SimpleNamespace(type="control_change", control=0, value=1, channel=0)
+    assert midi_message_to_osc(bank) == []
+    expression = SimpleNamespace(type="control_change", control=11, value=64, channel=0)
+    assert midi_message_to_osc(expression) == [
+        ("/rt2/intensity", cc_to_intensity(64))
+    ]

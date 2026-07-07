@@ -1,6 +1,6 @@
 # Entrypoint: bridge a BLE heart-rate monitor into a running RT2 engine
-# (run_engine.py) over OSC. This is the project's flagship source — HR drives the
-# music — but it's now "just another OSC client", a peer of run_midi.py.
+# (run_engine.py) over OSC. HR was the project's original source; today it is
+# "just another OSC client", a peer of run_midi.py and any external OSC tool.
 #
 # `--stub` runs the fully synthetic adapter (StubHRMonitor + StubOSCClient, no
 # hardware/network) and is the CI smoke path. Without it, the real bleak BLE

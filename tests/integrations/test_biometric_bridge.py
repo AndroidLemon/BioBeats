@@ -92,3 +92,55 @@ async def test_max_updates_bounds_the_loop():
     forwarded = await bridge.run(max_updates=1)
     assert forwarded == 2
     assert len(sender.sent) == 2
+
+
+async def test_stop_before_run_is_honored():
+    # A supervisor may stop() before (or between) runs; that request must not
+    # be lost when run() starts.
+    bridge, sender = _make_bridge([100, 120, 140])
+    bridge.stop()
+    forwarded = await asyncio.wait_for(bridge.run(), timeout=5)
+    assert forwarded == 0
+    assert sender.sent == []
+
+
+class _PacedHRMonitor:
+    """Delivers each reading only after the previous one was fully forwarded
+    (2 sends), so the latest-wins drain can't collapse them into one."""
+
+    def __init__(self, readings, sender):
+        self._readings = readings
+        self._sender = sender
+
+    async def stream_hr(self, queue, interval=1.0):
+        for i, hr in enumerate(self._readings):
+            await queue.put(hr)
+            while len(self._sender.sent) < 2 * (i + 1):
+                await asyncio.sleep(0)
+
+
+async def test_zone_hysteresis_threads_across_readings():
+    # 125 bpm enters push; 119 straddles the boundary and must stay push
+    # rather than flap the prompt back to base for one reading.
+    sender = StubOSCClient()
+    bridge = BiometricBridge(_PacedHRMonitor([125, 119], sender), sender)
+    await asyncio.wait_for(bridge.run(), timeout=5)
+    prompts = [v for a, v in sender.sent if a == "/rt2/prompt"]
+    push_prompt = hr_to_conditioning(125, 185)["prompt"]
+    assert prompts == [push_prompt, push_prompt]
+
+
+class _ExplodingHRMonitor:
+    """Yields one reading, then dies — a dropped BLE connection."""
+
+    async def stream_hr(self, queue, interval=1.0):
+        await queue.put(100)
+        raise OSError("BLE connection lost")
+
+
+async def test_source_failure_terminates_run_and_is_logged(caplog):
+    sender = StubOSCClient()
+    bridge = BiometricBridge(_ExplodingHRMonitor(), sender)
+    forwarded = await asyncio.wait_for(bridge.run(), timeout=5)
+    assert forwarded == 2  # the reading before the failure was forwarded
+    assert "HR source failed" in caplog.text

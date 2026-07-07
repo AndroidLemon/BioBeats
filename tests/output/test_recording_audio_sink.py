@@ -83,3 +83,16 @@ def test_pcm16_conversion_clips_out_of_range():
     left, right = np.frombuffer(pcm, dtype="<i2")
     assert left == 32767
     assert right == -32767
+
+
+def test_buffer_and_underrun_queries_forward_to_inner(tmp_path):
+    class _Inner(NullAudioSink):
+        def buffered_frames(self):
+            return 123
+
+        def underruns(self):
+            return 7
+
+    sink = RecordingAudioSink(_Inner(), tmp_path / "take.wav")
+    assert sink.buffered_frames() == 123
+    assert sink.underruns() == 7

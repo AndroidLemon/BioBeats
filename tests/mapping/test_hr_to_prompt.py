@@ -53,3 +53,45 @@ def test_custom_hr_max():
     # With lower max, 130 bpm should be all_out
     hr_to_conditioning(130, hr_max=150)
     assert hr_to_zone(130, hr_max=150) == "all_out"
+
+
+# --- hysteresis --------------------------------------------------------------
+
+
+def test_no_previous_zone_maps_plainly():
+    assert hr_to_zone(125, 185) == "push"  # ~67.6% of max
+
+
+def test_small_crossing_sticks_to_previous_zone():
+    # 121 bpm is just over the base/push boundary (65% of 185 = 120.25) but
+    # inside the hysteresis margin: an HR oscillating 119<->121 must not flap.
+    assert hr_to_zone(121, 185, previous="base") == "base"
+    assert hr_to_zone(121, 185, previous="push") == "push"
+
+
+def test_clear_crossing_switches_zone():
+    assert hr_to_zone(125, 185, previous="base") == "push"  # well past margin
+    assert hr_to_zone(116, 185, previous="push") == "base"  # well below margin
+
+
+def test_conditioning_threads_previous_zone_and_reports_zone():
+    first = hr_to_conditioning(125, 185)
+    assert first["zone"] == "push"
+    # Dropping just below the boundary keeps the push prompt (no flap)...
+    second = hr_to_conditioning(119, 185, previous_zone=first["zone"])
+    assert second["zone"] == "push"
+    assert second["prompt"] == first["prompt"]
+    # ...but a real drop returns to base.
+    third = hr_to_conditioning(110, 185, previous_zone=second["zone"])
+    assert third["zone"] == "base"
+
+
+def test_intensity_is_monotonic_and_clamped():
+    prev = None
+    last = 0.0
+    for hr in range(40, 221):
+        cond = hr_to_conditioning(hr, 185, previous_zone=prev)
+        prev = cond["zone"]
+        assert 0.0 <= cond["intensity"] <= 1.0
+        assert cond["intensity"] >= last - 1e-9
+        last = cond["intensity"]

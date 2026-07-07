@@ -65,3 +65,4 @@ class OSCServer:
     def shutdown(self) -> None:
         """Stop the serve loop and close the socket."""
         self._server.shutdown()
+        self._server.server_close()

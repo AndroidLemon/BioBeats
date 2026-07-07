@@ -1,9 +1,9 @@
 # Magenta RT2 engine client.
 #
 # This file owns the ONLY RT2-version-specific code in the project. Everything
-# else (pipeline, stubs, tests) depends on MRT2ClientProtocol below, never on a
-# concrete model version. The real MRT2Client (added later) lazy-imports the RT2
-# package so this module stays import-clean without the model installed.
+# else (engine, stubs, tests) depends on MRT2ClientProtocol below, never on a
+# concrete model version. The real MRT2Client lazy-imports the RT2 package so
+# this module stays import-clean without the model installed.
 
 from concurrent.futures import ThreadPoolExecutor
 from typing import Protocol, runtime_checkable
@@ -63,6 +63,17 @@ CHANNELS = 2
 FRAMES_PER_SECOND = 25  # RT2: 25 generation frames == 1 second
 CHUNK_SECONDS = 2.0
 CHUNK_FRAMES = int(FRAMES_PER_SECOND * CHUNK_SECONDS)  # 50 frames -> 2s
+# Style embeddings are cached per prompt so returning to a recent prompt (e.g.
+# HR oscillating across a zone boundary every reading) costs a dict lookup, not
+# an embed that steals time from the generation budget. Bounded FIFO eviction.
+EMBED_CACHE_MAX = 32
+
+# Intensity (0..1, from HR zones / MIDI velocity / CC) maps to sampling
+# temperature so it is actually audible: calm -> conservative sampling, hot ->
+# wilder. The range brackets the model's own default (1.3) so intensity 0.5 is
+# neutral. An explicit /rt2/temperature override always wins.
+INTENSITY_TEMP_MIN = 1.0
+INTENSITY_TEMP_MAX = 1.6
 
 
 class MRT2Client:
@@ -75,7 +86,7 @@ class MRT2Client:
 
     MLX binds its GPU command stream to the thread that builds the model graph;
     calling into the model from a different thread raises "There is no
-    Stream(gpu, N) in current thread." The pipeline already runs generate_chunk
+    Stream(gpu, N) in current thread." The engine already runs generate_chunk
     via asyncio.to_thread (to keep the event loop responsive), and that may pick
     a different worker thread than __init__ ran on — and a different one between
     calls. So every MLX touchpoint (construction, embedding, generation) is
@@ -93,9 +104,13 @@ class MRT2Client:
         self._drums: list[int] | None = None
         self._cfg_notes: float | None = None
         self._cfg_drums: float | None = None
+        self._cfg_style: float | None = None
+        self._temperature: float | None = None
+        self._topk: int | None = None
         self._mrt, self._style = self._executor.submit(
             self._load_backend, size, default_prompt
         ).result()
+        self._style_cache: dict[str, object] = {default_prompt: self._style}
 
     @staticmethod
     def _load_backend(size: str, default_prompt: str):
@@ -108,19 +123,41 @@ class MRT2Client:
     def update_conditioning(self, conditioning: dict) -> None:
         """Apply the latest conditioning. Re-embed the style only on prompt change.
 
-        notes/drums/cfg are cheap to set and stored for the next generate():
-        notes is RT2's 128-int pitch-state vector (or None), drums a 1-int list
-        (or None), and the CFG scales are per-channel floats (or None for the
-        model's defaults).
+        notes/drums/cfg/sampler knobs are cheap to set and stored for the next
+        generate(): notes is RT2's 128-int pitch-state vector (or None), drums
+        a 1-int list (or None), the CFG scales per-channel floats (or None for
+        the model's defaults). Temperature resolves as: explicit "temperature"
+        override > intensity-derived (INTENSITY_TEMP_MIN..MAX) > model default.
         """
         prompt = conditioning["prompt"]
         if prompt != self._prompt:
             self._prompt = prompt
-            self._style = self._executor.submit(self._mrt.embed_style, prompt).result()
+            self._style = self._embed_cached(prompt)
         self._notes = conditioning.get("notes")
         self._drums = conditioning.get("drums")
         self._cfg_notes = conditioning.get("cfg_notes")
         self._cfg_drums = conditioning.get("cfg_drums")
+        self._cfg_style = conditioning.get("cfg_style")
+        self._topk = conditioning.get("topk")
+        temperature = conditioning.get("temperature")
+        if temperature is None:
+            intensity = conditioning.get("intensity")
+            if intensity is not None:
+                temperature = INTENSITY_TEMP_MIN + float(intensity) * (
+                    INTENSITY_TEMP_MAX - INTENSITY_TEMP_MIN
+                )
+        self._temperature = temperature
+
+    def _embed_cached(self, prompt: str):
+        """Return the style embedding for `prompt`, embedding once per prompt."""
+        style = self._style_cache.get(prompt)
+        if style is None:
+            style = self._executor.submit(self._mrt.embed_style, prompt).result()
+            if len(self._style_cache) >= EMBED_CACHE_MAX:
+                # FIFO eviction: drop the oldest entry (dicts preserve order).
+                self._style_cache.pop(next(iter(self._style_cache)))
+            self._style_cache[prompt] = style
+        return style
 
     def generate_chunk(self) -> np.ndarray:
         """Generate one 2s chunk, threading the streaming state forward."""
@@ -131,6 +168,9 @@ class MRT2Client:
             drums=self._drums,
             cfg_notes=self._cfg_notes,
             cfg_drums=self._cfg_drums,
+            cfg_musiccoca=self._cfg_style,
+            temperature=self._temperature,
+            top_k=self._topk,
             frames=CHUNK_FRAMES,
             state=self._state,
         ).result()

@@ -1,8 +1,8 @@
 # Audio output sink.
 #
 # Defines AudioSinkProtocol, the interface shared by the real sounddevice-backed
-# sink (added later, lazy-imports sounddevice) and the NullAudioSink stub. The
-# pipeline depends only on this Protocol.
+# sink (which lazy-imports sounddevice) and the NullAudioSink stub. The engine
+# depends only on this Protocol.
 
 import threading
 from collections import deque
@@ -29,6 +29,18 @@ class AudioSinkProtocol(Protocol):
 
     def write(self, samples: np.ndarray) -> None:
         """Enqueue (N, 2) float32 samples for playback."""
+        ...
+
+    def buffered_frames(self) -> int:
+        """Frames enqueued but not yet played (0 for sinks with no queue).
+
+        The engine paces generation against this: staying a couple of chunks
+        ahead of playback keeps control-to-audio latency bounded.
+        """
+        ...
+
+    def underruns(self) -> int:
+        """Playback callbacks that ran short of data since start() (0 if n/a)."""
         ...
 
     def stop(self) -> None:
@@ -59,6 +71,9 @@ class AudioSink:
         self._lock = threading.Lock()
         self._chunks: deque[np.ndarray] = deque()
         self._head = 0  # frames already consumed from the front chunk
+        self._buffered = 0  # frames enqueued but not yet played
+        self._underruns = 0
+        self._ever_wrote = False  # so the startup gap isn't counted as underrun
         self._stream = None
 
     def start(self) -> None:
@@ -79,6 +94,18 @@ class AudioSink:
         chunk = np.asarray(samples, dtype=np.float32)
         with self._lock:
             self._chunks.append(chunk)
+            self._buffered += chunk.shape[0]
+            self._ever_wrote = True
+
+    def buffered_frames(self) -> int:
+        """Frames enqueued but not yet pulled by the playback callback."""
+        with self._lock:
+            return self._buffered
+
+    def underruns(self) -> int:
+        """Callbacks that ran short of data after playback began."""
+        with self._lock:
+            return self._underruns
 
     def _callback(self, outdata: np.ndarray, frames: int, time_info, status) -> None:
         """PortAudio pull callback: fill `outdata`, padding underruns with 0."""
@@ -90,9 +117,12 @@ class AudioSink:
                 outdata[filled : filled + take] = front[self._head : self._head + take]
                 filled += take
                 self._head += take
+                self._buffered -= take
                 if self._head >= front.shape[0]:
                     self._chunks.popleft()  # releases the consumed chunk
                     self._head = 0
+            if filled < frames and self._ever_wrote:
+                self._underruns += 1
         if filled < frames:
             outdata[filled:] = 0.0
 
